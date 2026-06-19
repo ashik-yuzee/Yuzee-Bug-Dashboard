@@ -106,15 +106,14 @@ Be specific, actionable, and professional. No fluff.`
 
     try {
       const data = await withRetry(async () => {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.NEXT_PUBLIC_GEMINI_API_KEY}`,
-          { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortRef.current!.signal,
-            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) }
-        )
+        const res = await fetch('/api/gemini', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortRef.current!.signal,
+          body: JSON.stringify({ prompt })
+        })
         if (!res.ok) throw new Error(`Gemini ${res.status}`)
         return res.json()
       }, { maxRetries: 2, signal: abortRef.current!.signal })
-      setAiSummary(data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response received.')
+      setAiSummary(data?.text || data?.raw?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response received.')
     } catch (err: unknown) {
       if ((err as Error).name !== 'AbortError')
         setAiSummary(`Error: ${(err as Error).message}`)

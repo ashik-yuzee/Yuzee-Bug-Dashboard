@@ -9,7 +9,6 @@ import { X, Sparkles, AlertTriangle, Copy, CheckCheck, ChevronDown, ChevronRight
 
 interface Props { bugs: ParsedBug[]; stats: DashboardStats; onClose: () => void }
 
-const GEMINI_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY
 const TIMEOUT_MS = 60_000
 
 /* ─── Prompt builder ─────────────────────────────────────── */
@@ -89,18 +88,12 @@ One-liners, null-guards, config fixes — easy to ship fast.`
 
 /* ─── Gemini call ────────────────────────────────────────── */
 async function callGemini(prompt: string, signal: AbortSignal): Promise<string> {
-  const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_KEY}`,
-    {
-      method: 'POST',
-      signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 3000 }
-      })
-    }
-  )
+  const resp = await fetch('/api/gemini', {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, generationConfig: { temperature: 0.3, maxOutputTokens: 3000 } }),
+  })
 
   if (resp.status === 429) {
     const retryAfter = resp.headers.get('Retry-After')
@@ -109,11 +102,11 @@ async function callGemini(prompt: string, signal: AbortSignal): Promise<string> 
   if (resp.status === 503) throw new Error('503: Gemini is temporarily unavailable.')
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}))
-    throw new Error(err?.error?.message || `Gemini API error ${resp.status}`)
+    throw new Error(err?.error || `Gemini API error ${resp.status}`)
   }
 
   const data = await resp.json()
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || 'Gemini returned an empty response.'
+  return data.text || 'Gemini returned an empty response.'
 }
 
 /* ─── Rich markdown renderer ─────────────────────────────── */
@@ -499,11 +492,9 @@ export default function AIAnalysisPanel({ bugs, stats, onClose }: Props) {
               <div>
                 <p style={{ fontWeight:600, color:'var(--tx-1)', marginBottom:6 }}>Analysis failed</p>
                 <p style={{ fontSize:13, color:'var(--tx-2)', maxWidth:420, lineHeight:1.6 }}>{error}</p>
-                {!GEMINI_KEY && (
-                  <p style={{ fontSize:12, color:'var(--tx-3)', marginTop:8 }}>
-                    Set <code style={{ background:'var(--surface-2)', padding:'1px 5px', borderRadius:3, color:'var(--info)' }}>NEXT_PUBLIC_GEMINI_API_KEY</code> in .env.local
-                  </p>
-                )}
+                <p style={{ fontSize:12, color:'var(--tx-3)', marginTop:8 }}>
+                  Ensure the Gemini API key is configured on the server (set <code style={{ background:'var(--surface-2)', padding:'1px 5px', borderRadius:3, color:'var(--info)' }}>GEMINI_API_KEY_SERVER</code> in your deployment environment). Do NOT expose server keys as NEXT_PUBLIC_ variables.
+                </p>
               </div>
               {!error.includes('cancelled') && (
                 <button onClick={runAnalysis} style={{

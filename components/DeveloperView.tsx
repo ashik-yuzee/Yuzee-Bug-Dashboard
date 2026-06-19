@@ -302,15 +302,14 @@ export default function DeveloperView({ bugs }: Props) {
       `Analyse this bug and provide:\n1. Root cause (2-3 sentences)\n2. User impact\n3. Fix suggestion\n4. Priority justification\n\nBug: ${bug.description || 'No description'}\nSeverity: ${bug.severity}\nModule: ${bug.module}\nComponent: ${bug.component || 'unknown'}\nEnvironment: ${bug.environment || 'unknown'}\nAI Summary: ${bug.ai_summary || 'none'}`
     try {
       const data = await withRetry(async () => {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.NEXT_PUBLIC_GEMINI_API_KEY}`,
-          { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortRef.current!.signal,
-            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) }
-        )
+        const res = await fetch('/api/gemini', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortRef.current!.signal,
+          body: JSON.stringify({ prompt })
+        })
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
         return res.json()
       }, { maxRetries: 2, signal: abortRef.current.signal })
-      setAiOutput(data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response received.')
+      setAiOutput(data?.text || data?.raw?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response received.')
     } catch (err: unknown) {
       if ((err as Error).name !== 'AbortError') toast.error('Gemini failed', (err as Error).message)
     } finally { setAiLoading(false) }

@@ -2,12 +2,14 @@
 
 import { useState } from 'react'
 import type { ErrorCluster, ParsedBug } from '@/lib/bugUtils'
+import { ROUTING_COLORS } from '@/lib/utils'
 import { ChevronDown, ChevronRight, ExternalLink, Sparkles, Copy, CheckCheck, GitMerge } from 'lucide-react'
 
 interface Props {
   clusters: ErrorCluster[]
   onAnalyse: (bugs: ParsedBug[]) => void
   onViewBug: (bug: ParsedBug) => void
+  onNavigateToBugs?: (pattern: string) => void
 }
 
 const SEV: Record<string, { bg: string; color: string; border: string }> = {
@@ -46,8 +48,9 @@ function MiniSevBar({ data }: { data: Record<string, number> }) {
   )
 }
 
-function ClusterCard({ cluster, rank, onAnalyse, onViewBug }: {
+function ClusterCard({ cluster, rank, onAnalyse, onViewBug, onNavigateToBugs }: {
   cluster: ErrorCluster; rank: number; onAnalyse: (bugs: ParsedBug[]) => void; onViewBug: (bug: ParsedBug) => void
+  onNavigateToBugs?: (pattern: string) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -59,6 +62,8 @@ function ClusterCard({ cluster, rank, onAnalyse, onViewBug }: {
   const errBadge = ET_BADGE[errType] || ET_BADGE.Unknown
   const isProd = cluster.environments.includes('production')
   const fmtDate = (s: string) => s ? s.slice(0, 10) : '—'
+  const domRouting = cluster.routingTokens[0] as 'BACKEND' | 'MOBILE' | 'WEB' | undefined
+  const routeStyle = domRouting ? ROUTING_COLORS[domRouting] : null
 
   const copyKey = () => {
     navigator.clipboard.writeText(cluster.description).catch(() => {})
@@ -135,6 +140,16 @@ function ClusterCard({ cluster, rank, onAnalyse, onViewBug }: {
             }}>
               {errBadge.label}
             </span>
+            {routeStyle && (
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: routeStyle.bg, color: routeStyle.color, border: `1px solid ${routeStyle.border}`, flexShrink: 0 }}>
+                {domRouting}
+              </span>
+            )}
+            {cluster.topComponent && (
+              <span style={{ fontSize: 10, color: 'var(--tx-3)', background: 'var(--surface-2)', padding: '2px 6px', borderRadius: 3, border: '1px solid var(--border)', flexShrink: 0 }}>
+                {cluster.topComponent}
+              </span>
+            )}
             {isProd && (
               <span style={{
                 fontSize: 10, color: 'var(--danger)', background: 'rgba(248,81,73,.10)',
@@ -253,29 +268,28 @@ function ClusterCard({ cluster, rank, onAnalyse, onViewBug }: {
           </div>
 
           {/* Action buttons */}
-          <div style={{ display: 'flex', gap: 5 }}>
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {onNavigateToBugs && (
+              <button
+                onClick={e => { e.stopPropagation(); onNavigateToBugs(cluster.normalizedKey.slice(0, 40)) }}
+                aria-label={`View ${cluster.count} bugs for this cluster`}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '5px 9px', fontSize: 11, fontWeight: 600, color: 'var(--tx-2)', cursor: 'pointer', transition: 'all .15s' }}
+              >
+                View {cluster.count} →
+              </button>
+            )}
             <button
               onClick={e => { e.stopPropagation(); copyKey() }}
               aria-label="Copy error message"
               title="Copy error message"
-              style={{
-                background: 'var(--surface-2)', border: '1px solid var(--border)',
-                borderRadius: 'var(--r-sm)', padding: '5px 7px', color: 'var(--tx-3)',
-                display: 'flex', alignItems: 'center', cursor: 'pointer', transition: 'all .15s',
-              }}
+              style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '5px 7px', color: 'var(--tx-3)', display: 'flex', alignItems: 'center', cursor: 'pointer', transition: 'all .15s' }}
             >
               {copied ? <CheckCheck size={11} color="var(--success)" /> : <Copy size={11} />}
             </button>
             <button
               onClick={e => { e.stopPropagation(); onAnalyse(cluster.bugs) }}
               aria-label="Run AI analysis on this cluster"
-              style={{
-                display: 'flex', alignItems: 'center', gap: 4,
-                background: 'var(--purple-dim)', border: '1px solid rgba(163,113,247,.25)',
-                borderRadius: 'var(--r-sm)', padding: '5px 9px',
-                fontSize: 11, fontWeight: 600, color: 'var(--purple)',
-                cursor: 'pointer', transition: 'all .15s',
-              }}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'var(--purple-dim)', border: '1px solid rgba(163,113,247,.25)', borderRadius: 'var(--r-sm)', padding: '5px 9px', fontSize: 11, fontWeight: 600, color: 'var(--purple)', cursor: 'pointer', transition: 'all .15s' }}
             >
               <Sparkles size={11} /> AI
             </button>
@@ -425,7 +439,7 @@ function ClusterCard({ cluster, rank, onAnalyse, onViewBug }: {
   )
 }
 
-export default function BugClusters({ clusters, onAnalyse, onViewBug }: Props) {
+export default function BugClusters({ clusters, onAnalyse, onViewBug, onNavigateToBugs }: Props) {
   const [clusterFilter, setClusterFilter] = useState<'all' | 'unresolved' | 'no-jira' | 'production'>('all')
 
   const filtered = clusters.filter(c => {
@@ -524,6 +538,7 @@ export default function BugClusters({ clusters, onAnalyse, onViewBug }: Props) {
               rank={i + 1}
               onAnalyse={onAnalyse}
               onViewBug={onViewBug}
+              onNavigateToBugs={onNavigateToBugs}
             />
           ))
         )}

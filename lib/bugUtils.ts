@@ -1,4 +1,5 @@
 import type { BugReport } from '@/components/DashboardClient'
+import { deriveRoutingToken } from '@/lib/utils'
 
 export interface ParsedBug extends BugReport {
   errorType: 'TypeError' | 'NullPointerException' | 'InvokeException' | 'HttpError' | 'ChunkLoadError' | 'RateLimit' | 'Unimplemented' | 'Unknown'
@@ -8,6 +9,7 @@ export interface ParsedBug extends BugReport {
   occurrences: number
   parsedLabels: string[]
   module: 'WEB' | 'APP' | 'BACKEND' | 'INFRASTRUCTURE'
+  routingToken: 'BACKEND' | 'MOBILE' | 'WEB' | null
 }
 
 export interface ErrorCluster {
@@ -27,6 +29,8 @@ export interface ErrorCluster {
   lastSeen: string
   environments: string[]
   modules: string[]
+  routingTokens: string[]
+  topComponent: string | null
 }
 
 export interface DailyVolume {
@@ -44,6 +48,12 @@ export interface DashboardStats {
   p2count: number
   resolvedRate: number
   avgConfidence: number
+  jiraPendingCount: number
+  duplicateCount: number
+  /** bugs detected as duplicates via rollbar_id grouping (same Rollbar item fired multiple times) */
+  rollbarDuplicateCount: number
+  /** bugs that share a jira_key with another bug but aren't flagged is_duplicate */
+  sameTicketCount: number
   dailyVolume: DailyVolume[]
   versionBreakdown: { version: string; total: number; P1: number; P2: number; P3: number; P4: number; pending: number }[]
   categoryBreakdown: { category: string; count: number; P1: number; P2: number }[]
@@ -56,6 +66,8 @@ export interface DashboardStats {
   environmentBreakdown: { env: string; count: number; P1: number; P2: number }[]
   sourceBreakdown: { source: string; count: number; P1: number; percentage: number }[]
   errorTypeBreakdown: { type: string; count: number; P1: number; P2: number }[]
+  routingBreakdown: { routing: string; count: number; P1: number; P2: number }[]
+  componentBreakdown: { component: string; count: number; P1: number; P2: number }[]
 }
 
 export interface Insight {
@@ -102,21 +114,23 @@ function normalizeDescription(desc: string): string {
 }
 
 export function parseBug(bug: BugReport): ParsedBug {
-  let environment: string | null = null
+  let environment: string | null = bug.environment || null
   let pageUrl: string | null = null
-  let rollbarItemId: string | null = null
+  let rollbarItemId: string | null = bug.rollbar_id || null
 
   try {
     const fd = JSON.parse(bug.full_data || '{}')
     const inner = JSON.parse(fd.full_data || '{}')
     const ctx = inner.context || {}
-    environment = ctx.environment || fd.environment || null
+    if (!environment) environment = ctx.environment || fd.environment || null
     pageUrl = ctx.page_url || bug.location || null
-    const rb = inner._rb || {}
-    rollbarItemId = rb.item_id
-      || (rb.item_url && (rb.item_url as string).match(/\/items\/(\d+)/)?.[1])
-      || (inner.rollbar || {}).item_id
-      || null
+    if (!rollbarItemId) {
+      const rb = inner._rb || {}
+      rollbarItemId = rb.item_id
+        || (rb.item_url && (rb.item_url as string).match(/\/items\/(\d+)/)?.[1])
+        || (inner.rollbar || {}).item_id
+        || null
+    }
   } catch {}
 
   const desc = bug.description || ''
@@ -141,6 +155,7 @@ export function parseBug(bug: BugReport): ParsedBug {
     occurrences: parseFrequency(bug.frequency),
     parsedLabels,
     module: getModule({ source: bug.source, platform: bug.platform, component: bug.component, description: bug.description, errorType }),
+    routingToken: deriveRoutingToken(bug),
   }
 }
 
@@ -162,6 +177,8 @@ export function clusterByDescription(bugs: ParsedBug[]): ErrorCluster[] {
       const components: string[] = []
       const envSet = new Set<string>()
       const moduleSet = new Set<string>()
+      const routingSet = new Set<string>()
+      const compCount: Record<string, number> = {}
       let occurrenceTotal = 0
 
       for (const b of clusterBugs) {
@@ -170,9 +187,13 @@ export function clusterByDescription(bugs: ParsedBug[]): ErrorCluster[] {
         versions[b.app_version || 'unknown'] = (versions[b.app_version || 'unknown'] || 0) + 1
         if (b.jira_key && !jiraKeys.includes(b.jira_key)) jiraKeys.push(b.jira_key)
         if (b.rollbarItemId && !rollbarIds.includes(b.rollbarItemId)) rollbarIds.push(b.rollbarItemId)
-        if (b.component && !components.includes(b.component)) components.push(b.component)
+        if (b.component) {
+          if (!components.includes(b.component)) components.push(b.component)
+          compCount[b.component] = (compCount[b.component] || 0) + 1
+        }
         if (b.environment) envSet.add(b.environment)
         moduleSet.add(b.module)
+        if (b.routingToken) routingSet.add(b.routingToken)
         occurrenceTotal += b.occurrences
       }
 
@@ -182,6 +203,8 @@ export function clusterByDescription(bugs: ParsedBug[]): ErrorCluster[] {
       })[0]
 
       const sorted = [...clusterBugs].sort((a, b) => a.created_at.localeCompare(b.created_at))
+
+      const topComponent = Object.entries(compCount).sort(([, a], [, b]) => b - a)[0]?.[0] || null
 
       return {
         description: clusterBugs[0].description || 'Unknown error',
@@ -200,6 +223,8 @@ export function clusterByDescription(bugs: ParsedBug[]): ErrorCluster[] {
         lastSeen: sorted[sorted.length - 1]?.created_at ?? '',
         environments: [...envSet],
         modules: [...moduleSet],
+        routingTokens: [...routingSet],
+        topComponent,
       }
     })
     .sort((a, b) => b.count - a.count)
@@ -215,11 +240,36 @@ export function computeStats(bugs: ParsedBug[]): DashboardStats {
   const resolvedRate = total > 0 ? Math.round((complete / total) * 100) : 0
   const confVals = bugs.filter(b => b.confidence != null).map(b => b.confidence as number)
   const avgConfidence = confVals.length > 0 ? confVals.reduce((a, b) => a + b, 0) / confVals.length : 0
+  const jiraPendingCount = bugs.filter(b => b.jira_pending === true).length
+  // Primary duplicate count: n8n-flagged duplicates
+  const duplicateCount = bugs.filter(b => b.is_duplicate === true).length
 
-  // Daily volume
+  // Rollbar-based duplicate detection: multiple bug_reports with the same rollbar_id
+  // (same Rollbar item fired multiple times — all after the first are effective duplicates)
+  const rollbarIdGroups: Record<string, number> = {}
+  for (const b of bugs) {
+    const rid = b.rollbar_id || b.rollbarItemId
+    if (rid) rollbarIdGroups[rid] = (rollbarIdGroups[rid] || 0) + 1
+  }
+  // Count extras: for each group of N, there are N-1 duplicates not flagged as is_duplicate
+  const rollbarDuplicateCount = Object.values(rollbarIdGroups)
+    .reduce((acc, n) => acc + Math.max(0, n - 1), 0)
+
+  // Same-ticket detection: multiple bugs sharing the same jira_key but is_duplicate not set
+  // (pipeline created ticket once, subsequent bugs were linked but not flagged)
+  const jiraKeyGroups: Record<string, number> = {}
+  for (const b of bugs) {
+    if (b.jira_key && !b.is_duplicate) {
+      jiraKeyGroups[b.jira_key] = (jiraKeyGroups[b.jira_key] || 0) + 1
+    }
+  }
+  const sameTicketCount = Object.values(jiraKeyGroups)
+    .reduce((acc, n) => acc + Math.max(0, n - 1), 0)
+
+  // Daily volume — prefer timestamp_utc for accurate date, fallback to created_at
   const byDate: Record<string, BugReport[]> = {}
   for (const b of bugs) {
-    const d = b.created_at.slice(0, 10)
+    const d = (b.timestamp_utc || b.created_at).slice(0, 10)
     if (!byDate[d]) byDate[d] = []
     byDate[d].push(b)
   }
@@ -272,15 +322,46 @@ export function computeStats(bugs: ParsedBug[]): DashboardStats {
     }))
     .sort((a, b) => b.count - a.count)
 
-  // Error clusters (with improved normalization)
+  // Routing breakdown
+  const byRouting: Record<string, ParsedBug[]> = {}
+  for (const b of bugs) {
+    const r = b.routingToken || 'Unknown'
+    if (!byRouting[r]) byRouting[r] = []
+    byRouting[r].push(b)
+  }
+  const routingBreakdown = Object.entries(byRouting)
+    .map(([routing, rbugs]) => ({
+      routing, count: rbugs.length,
+      P1: rbugs.filter(b => b.severity === 'P1').length,
+      P2: rbugs.filter(b => b.severity === 'P2').length,
+    }))
+    .sort((a, b) => b.count - a.count)
+
+  // Component breakdown
+  const byComp: Record<string, ParsedBug[]> = {}
+  for (const b of bugs) {
+    const c = b.component || 'Unknown'
+    if (!byComp[c]) byComp[c] = []
+    byComp[c].push(b)
+  }
+  const componentBreakdown = Object.entries(byComp)
+    .map(([component, cbugs]) => ({
+      component, count: cbugs.length,
+      P1: cbugs.filter(b => b.severity === 'P1').length,
+      P2: cbugs.filter(b => b.severity === 'P2').length,
+    }))
+    .sort((a, b) => b.count - a.count)
+
+  // Error clusters
   const errorClusters = clusterByDescription(bugs)
 
-  // Rollbar groups
+  // Rollbar groups — use rollbar_id (direct column) with fallback to parsed rollbarItemId
   const rollbarMap: Record<string, ParsedBug[]> = {}
   for (const b of bugs) {
-    if (b.rollbarItemId) {
-      if (!rollbarMap[b.rollbarItemId]) rollbarMap[b.rollbarItemId] = []
-      rollbarMap[b.rollbarItemId].push(b)
+    const rid = b.rollbar_id || b.rollbarItemId
+    if (rid) {
+      if (!rollbarMap[rid]) rollbarMap[rid] = []
+      rollbarMap[rid].push(b)
     }
   }
   const rollbarGroups = Object.entries(rollbarMap)
@@ -295,7 +376,7 @@ export function computeStats(bugs: ParsedBug[]): DashboardStats {
   // Hourly volume
   const byHour: Record<number, number> = {}
   for (const b of bugs) {
-    const h = new Date(b.created_at).getUTCHours()
+    const h = new Date(b.timestamp_utc || b.created_at).getUTCHours()
     byHour[h] = (byHour[h] || 0) + 1
   }
   const hourlyVolume = Object.entries(byHour)
@@ -389,8 +470,17 @@ export function computeStats(bugs: ParsedBug[]): DashboardStats {
     insights.push({
       type: 'critical', icon: '🔴',
       title: `${p1count} P1 critical bug${p1count > 1 ? 's' : ''} require immediate attention`,
-      body: `${jiras} — NullPointerException during user signup. The /users/api/v1/public/users/signup endpoint is throwing null refs, potentially blocking new user registration.`,
+      body: `${jiras || 'No Jira tickets yet'} — NullPointerException during user signup. The /users/api/v1/public/users/signup endpoint is throwing null refs, potentially blocking new user registration.`,
       metric: `${p1count} P1`,
+    })
+  }
+
+  if (jiraPendingCount > 0) {
+    insights.push({
+      type: 'warning', icon: '⚠️',
+      title: `${jiraPendingCount} bug${jiraPendingCount > 1 ? 's' : ''} failed to create a Jira ticket`,
+      body: 'These bugs were triaged but the n8n pipeline could not create a Jira ticket. Manual review and retry needed.',
+      metric: `${jiraPendingCount} failed`,
     })
   }
 
@@ -400,7 +490,7 @@ export function computeStats(bugs: ParsedBug[]): DashboardStats {
     insights.push({
       type: 'warning', icon: '⚡',
       title: `Single error pattern accounts for ${pct}% of all reports`,
-      body: `"${top.description.slice(0, 80)}${top.description.length > 80 ? '…' : ''}" appears ${top.count} times across ${Object.keys(top.versions).length} app versions. Fixing this eliminates ${pct}% of the backlog.`,
+      body: `"${top.description.slice(0, 80)}${top.description.length > 80 ? '…' : ''}" appears ${top.count} times. Fixing this eliminates ${pct}% of the backlog.`,
       metric: `${top.count}× repeated`,
     })
   }
@@ -409,7 +499,7 @@ export function computeStats(bugs: ParsedBug[]): DashboardStats {
     insights.push({
       type: 'action', icon: '⚠️',
       title: `${pendingNoJira} pending bugs have no Jira ticket`,
-      body: `These bugs are in the pipeline but haven't been escalated. The n8n workflow may have stalled or these arrived before automation was in place.`,
+      body: 'These bugs are in the pipeline but have not been escalated. The n8n workflow may have stalled.',
       metric: `${pendingNoJira} untracked`,
     })
   }
@@ -418,9 +508,47 @@ export function computeStats(bugs: ParsedBug[]): DashboardStats {
     insights.push({
       type: 'info', icon: '🧑‍💻',
       title: `${needsHumanReview} bugs flagged for human review`,
-      body: `The AI triage system marked these with "needs-human-review" — low-confidence categorisations or edge cases that need manual verification before Jira escalation.`,
+      body: 'The AI triage system marked these with "needs-human-review" — low-confidence categorisations or edge cases.',
       metric: `${needsHumanReview} flagged`,
     })
+  }
+
+  if (duplicateCount > 0) {
+    const dupPct = total > 0 ? Math.round((duplicateCount / total) * 100) : 0
+    insights.push({
+      type: 'info', icon: '🔄',
+      title: `${dupPct}% of bugs this week are duplicates of existing tickets`,
+      body: `${duplicateCount} bugs were identified as duplicates of already-ticketed issues. These don't need new Jira tickets.`,
+      metric: `${duplicateCount} duplicates`,
+    })
+  }
+
+  // Component spike insight: find component with most bugs in last 24h
+  const now = Date.now()
+  const yesterday = now - 86_400_000
+  const twoDaysAgo = now - 172_800_000
+  const compToday: Record<string, number> = {}
+  const compYesterday: Record<string, number> = {}
+  for (const b of bugs) {
+    const t = new Date(b.timestamp_utc || b.created_at).getTime()
+    const c = b.component
+    if (!c) continue
+    if (t >= yesterday) compToday[c] = (compToday[c] || 0) + 1
+    else if (t >= twoDaysAgo) compYesterday[c] = (compYesterday[c] || 0) + 1
+  }
+  const topCompEntry = Object.entries(compToday).sort(([, a], [, b]) => b - a)[0]
+  if (topCompEntry && topCompEntry[1] >= 3) {
+    const [comp, todayCount] = topCompEntry
+    const prevCount = compYesterday[comp] || 1
+    const pctChange = Math.round(((todayCount - prevCount) / prevCount) * 100)
+    if (pctChange > 50) {
+      insights.push({
+        type: 'info', icon: '📈',
+        title: `${comp} component has ${todayCount} new bugs in the last 24 hours`,
+        body: `Up ${pctChange}% from the previous 24h. This may indicate a recent deployment issue or a new user-facing bug.`,
+        metric: `+${pctChange}%`,
+      })
+    }
   }
 
   const sortedDays = [...dailyVolume].sort((a, b) => b.total - a.total)
@@ -428,26 +556,18 @@ export function computeStats(bugs: ParsedBug[]): DashboardStats {
     insights.push({
       type: sortedDays[0].P1 > 0 ? 'critical' : 'warning', icon: '📈',
       title: `Volume spike on ${sortedDays[0].label}: ${sortedDays[0].total} bugs`,
-      body: `This was ${Math.round(sortedDays[0].total / (total / dailyVolume.length))}× the daily average. ${sortedDays[0].P1 > 0 ? `Included ${sortedDays[0].P1} P1 critical bug(s).` : 'Severity was mostly P2.'} May correlate with a deployment.`,
+      body: `This was ${Math.round(sortedDays[0].total / (total / Math.max(dailyVolume.length, 1)))}× the daily average. ${sortedDays[0].P1 > 0 ? `Included ${sortedDays[0].P1} P1 critical bug(s).` : 'Severity was mostly P2.'} May correlate with a deployment.`,
       metric: `${sortedDays[0].total} in one day`,
-    })
-  }
-
-  const companyProfileBugs = bugs.filter(b => b.description && b.description.includes('Company profile'))
-  if (companyProfileBugs.length > 0) {
-    insights.push({
-      type: 'warning', icon: '👤',
-      title: 'Real users reporting Company Profile crashes',
-      body: `${companyProfileBugs.length} user-submitted reports about the Company Profile location editor crashing on the Yuzee app. Confirmed UX-facing issue.`,
-      metric: `${companyProfileBugs.length} user reports`,
     })
   }
 
   return {
     total, pendingNoJira, needsHumanReview, p1count, p2count,
-    resolvedRate, avgConfidence, dailyVolume, versionBreakdown,
-    categoryBreakdown, errorClusters, insights, rollbarGroups,
-    hourlyVolume, topPageUrls,
+    resolvedRate, avgConfidence, jiraPendingCount, duplicateCount,
+    rollbarDuplicateCount, sameTicketCount,
+    dailyVolume, versionBreakdown, categoryBreakdown, errorClusters,
+    insights, rollbarGroups, hourlyVolume, topPageUrls,
     moduleBreakdown, environmentBreakdown, sourceBreakdown, errorTypeBreakdown,
+    routingBreakdown, componentBreakdown,
   }
 }

@@ -21,17 +21,16 @@ export function useRealtimeBugs(): UseRealtimeBugsResult {
   useEffect(() => {
     const channel = supabase
       .channel('bug_reports_live', { config: { broadcast: { ack: false } } })
-      .on<BugReport>(
-        'postgres_changes' as Parameters<typeof channel.on>[0],
-        { event: 'INSERT', schema: 'public', table: 'bug_reports' },
-        payload => {
-          setNewBugs(prev => [payload.new as BugReport, ...prev])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .on('postgres_changes' as any, { event: 'INSERT', schema: 'public', table: 'bug_reports' },
+        (payload: { new: BugReport }) => {
+          setNewBugs(prev => [payload.new, ...prev])
         }
       )
-      .subscribe(status => {
-        if (status === 'SUBSCRIBED')   setStatus('connected')
-        else if (status === 'CLOSED')  setStatus('closed')
-        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') setStatus('error')
+      .subscribe((s: string) => {
+        if (s === 'SUBSCRIBED')   setStatus('connected')
+        else if (s === 'CLOSED')  setStatus('closed')
+        else if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT') setStatus('error')
         else setStatus('connecting')
       })
 

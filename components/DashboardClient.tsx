@@ -4,25 +4,28 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { logoutAction } from '@/app/actions/auth'
 import { parseBug, computeStats } from '@/lib/bugUtils'
+import type { ParsedBug } from '@/lib/bugUtils'
 import toast from '@/lib/toast'
 import { useRealtimeBugs } from '@/hooks/useRealtimeBugs'
 import { useNetworkStatus } from '@/hooks/useNetworkStatus'
+import { useGeminiQueue } from '@/hooks/useGeminiQueue'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
-import FilterSidebar from './FilterSidebar'
 import BugTable from './BugTable'
 import Overview from './Overview'
 import BugClusters from './BugClusters'
 import DeveloperView from './DeveloperView'
 import AIAnalysisPanel from './AIAnalysisPanel'
-import BugDetailModal from './BugDetailModal'
+import BugDetailPanel from './BugDetailPanel'
+import PipelineTab from './PipelineTab'
 import {
-  Bug, LogOut, RefreshCw, Sparkles, SlidersHorizontal,
-  BarChart3, List, Layers, WifiOff, Radio, Bell, Code2, FileText
+  Bug, LogOut, RefreshCw, Sparkles,
+  BarChart3, List, Layers, WifiOff, Radio, Bell, Code2, FileText,
+  Activity, AlertTriangle, X
 } from 'lucide-react'
 import Reports from './Reports'
 
 export type BugReport = {
-  report_id: string; source: string | null; reporter_email: string | null
+  id: string; report_id: string; source: string | null; reporter_email: string | null
   description: string | null; platform: string | null; app_version: string | null
   severity: string | null; ai_summary: string | null; jira_key: string | null
   jira_url: string | null; status: string | null; created_at: string
@@ -31,27 +34,43 @@ export type BugReport = {
   labels: string | null; component: string | null; confidence: number | null
   is_duplicate: boolean | null; triaged_at: string | null; screenshot_url: string | null
   jira_pending: boolean | null; retry_count: number | null
+  correlation_id: string | null
+  rollbar_id: string | null
+  rollbar_project_id: string | null
+  timestamp_utc: string | null
+  environment: string | null
+  posthog_session_url: string | null
+  feature_flags: string | null
+}
+
+export type GeminiQueueItem = {
+  id: string
+  report_id: string
+  status: 'queued' | 'processed' | 'stale' | 'failed'
+  queued_at: string
+  processed_at: string | null
+  created_at: string
 }
 
 export type Filters = {
   search: string; severity: string[]; status: string[]; category: string[]
   platform: string[]; source: string[]; component: string[]; errorType: string[]
   environment: string[]; module: string[]; isDuplicate: string; dateFrom: string; dateTo: string
+  hasJira: string; jiraPending: string
 }
 
 export type SortConfig = { key: keyof BugReport; dir: 'asc' | 'desc' }
-type Tab = 'overview' | 'bugs' | 'clusters' | 'developer' | 'reports'
+type Tab = 'overview' | 'bugs' | 'clusters' | 'pipeline' | 'developer' | 'reports'
 
-const BLANK_FILTERS: Filters = {
+export const BLANK_FILTERS: Filters = {
   search: '', severity: [], status: [], category: [], platform: [],
   source: [], component: [], errorType: [], environment: [], module: [],
-  isDuplicate: 'all', dateFrom: '', dateTo: ''
+  isDuplicate: 'all', dateFrom: '', dateTo: '', hasJira: 'all', jiraPending: 'all',
 }
 
 interface AdminUser { email: string }
 interface Props { user: AdminUser; initialBugs: BugReport[] }
 
-/* ─── Styles ─────────────────────────────────────────────── */
 const S = {
   root: { display:'flex', flexDirection:'column', height:'100vh', overflow:'hidden', background:'var(--bg)' } as const,
   header: {
@@ -74,19 +93,19 @@ export default function DashboardClient({ user, initialBugs }: Props) {
   const supabase = createClient()
   const { online } = useNetworkStatus()
   const { newBugs, status: rtStatus, clearNewBugs } = useRealtimeBugs()
+  const { stats: queueStats } = useGeminiQueue()
 
   const [bugs, setBugs] = useState<BugReport[]>(initialBugs)
   const [activeTab, setActiveTab] = useState<Tab>('overview')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [filters, setFilters] = useState<Filters>(BLANK_FILTERS)
   const [sort, setSort] = useState<SortConfig>({ key: 'created_at', dir: 'desc' })
-  const [showFilters, setShowFilters] = useState(false)
   const [showAI, setShowAI] = useState(false)
-  const [detailBug, setDetailBug] = useState<BugReport | null>(null)
+  const [detailBug, setDetailBug] = useState<ParsedBug | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [dismissedBanners, setDismissedBanners] = useState<Set<string>>(new Set())
   const prevOnline = useRef<boolean | null>(null)
 
-  // Network recovery: auto-refresh when coming back online
   useEffect(() => {
     if (online === true && prevOnline.current === false) {
       toast.info('Connection restored', 'Refreshing bug reports…')
@@ -97,7 +116,6 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     }
     prevOnline.current = online
   }, [online])
-
 
   const handleRefresh = useCallback(async () => {
     if (refreshing) return
@@ -129,7 +147,6 @@ export default function DashboardClient({ user, initialBugs }: Props) {
 
   const handleSignOut = () => logoutAction()
 
-  // Absorb real-time new bugs
   const handleAbsorbNew = useCallback(() => {
     setBugs(prev => {
       const existingIds = new Set(prev.map(b => b.report_id))
@@ -143,10 +160,15 @@ export default function DashboardClient({ user, initialBugs }: Props) {
   const parsedBugs = useMemo(() => bugs.map(parseBug), [bugs])
   const stats = useMemo(() => computeStats(parsedBugs), [parsedBugs])
 
+  const jiraPendingCount = useMemo(() => parsedBugs.filter(b => b.jira_pending === true).length, [parsedBugs])
+  const stuckCount = queueStats.stuckItems.length
+
   const filtered = useMemo(() => {
     let r = [...parsedBugs]
     const { search, severity, status, category, platform, source,
-            component, errorType, environment, module, isDuplicate, dateFrom, dateTo } = filters
+            component, errorType, environment, module, isDuplicate,
+            dateFrom, dateTo, hasJira, jiraPending } = filters
+
     if (search) {
       const q = search.toLowerCase()
       r = r.filter(b =>
@@ -161,7 +183,8 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     if (severity.length)    r = r.filter(b => b.severity    && severity.includes(b.severity))
     if (status.length)      r = r.filter(b => b.status      && status.includes(b.status))
     if (category.length)    r = r.filter(b => b.category    && category.includes(b.category))
-    if (platform.length)    r = r.filter(b => b.platform    && platform.includes(b.platform))
+    // platform filter uses routingToken (BACKEND/MOBILE/WEB)
+    if (platform.length)    r = r.filter(b => b.routingToken && platform.includes(b.routingToken))
     if (source.length)      r = r.filter(b => b.source      && source.includes(b.source))
     if (component.length)   r = r.filter(b => b.component   && component.includes(b.component))
     if (errorType.length)   r = r.filter(b => errorType.includes(b.errorType))
@@ -169,8 +192,13 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     if (module.length)      r = r.filter(b => module.includes(b.module))
     if (isDuplicate === 'yes') r = r.filter(b => b.is_duplicate)
     if (isDuplicate === 'no')  r = r.filter(b => !b.is_duplicate)
-    if (dateFrom) r = r.filter(b => new Date(b.created_at) >= new Date(dateFrom))
-    if (dateTo)   r = r.filter(b => new Date(b.created_at) <= new Date(dateTo + 'T23:59:59'))
+    if (dateFrom) r = r.filter(b => new Date(b.timestamp_utc || b.created_at) >= new Date(dateFrom))
+    if (dateTo)   r = r.filter(b => new Date(b.timestamp_utc || b.created_at) <= new Date(dateTo + 'T23:59:59'))
+    if (hasJira === 'yes')     r = r.filter(b => !!b.jira_key)
+    if (hasJira === 'no')      r = r.filter(b => !b.jira_key)
+    if (jiraPending === 'yes') r = r.filter(b => b.jira_pending === true)
+    if (jiraPending === 'no')  r = r.filter(b => !b.jira_pending)
+
     r.sort((a, b) => {
       const av = String(a[sort.key as keyof typeof a] ?? '')
       const bv = String(b[sort.key as keyof typeof b] ?? '')
@@ -181,14 +209,17 @@ export default function DashboardClient({ user, initialBugs }: Props) {
 
   const selectedBugs = useMemo(() => filtered.filter(b => selected.has(b.report_id)), [filtered, selected])
 
-  const toggleSelect  = useCallback((id: string) => {
+  const toggleSelect    = useCallback((id: string) => {
     setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
   }, [])
-  const selectAll     = useCallback(() => {
+  const selectAll       = useCallback(() => {
     setSelected(selected.size === filtered.length ? new Set() : new Set(filtered.map(b => b.report_id)))
   }, [filtered, selected.size])
-  const clearFilters  = useCallback(() => setFilters(BLANK_FILTERS), [])
-  const clearSelection = useCallback(() => setSelected(new Set()), [])
+  const clearFilters    = useCallback(() => setFilters(BLANK_FILTERS), [])
+  const clearSelection  = useCallback(() => setSelected(new Set()), [])
+  const dismissBanner   = useCallback((key: string) => {
+    setDismissedBanners(prev => new Set([...prev, key]))
+  }, [])
 
   const activeFilterCount = useMemo(() => [
     filters.search,
@@ -197,18 +228,67 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     ...filters.errorType, ...filters.environment, ...filters.module,
     filters.isDuplicate !== 'all' ? '1' : '',
     filters.dateFrom, filters.dateTo,
+    filters.hasJira !== 'all' ? '1' : '',
+    filters.jiraPending !== 'all' ? '1' : '',
   ].filter(Boolean).length, [filters])
 
+  const navigateToBugs = useCallback((f: Record<string, string | string[]>) => {
+    setFilters(prev => ({ ...prev, ...f }))
+    setActiveTab('bugs')
+  }, [])
+
   const tabs: { id: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
-    { id: 'overview',   label: 'Overview',       icon: <BarChart3 size={14} aria-hidden /> },
-    { id: 'bugs',       label: 'All Bugs',        icon: <List      size={14} aria-hidden />, badge: bugs.length },
-    { id: 'clusters',   label: 'Error Clusters',  icon: <Layers    size={14} aria-hidden />, badge: stats.errorClusters.length },
-    { id: 'developer',  label: 'Developer',       icon: <Code2     size={14} aria-hidden /> },
-    { id: 'reports',    label: 'Reports',          icon: <FileText  size={14} aria-hidden /> },
+    { id: 'overview',  label: 'Overview',       icon: <BarChart3 size={14} aria-hidden /> },
+    { id: 'bugs',      label: 'All Bugs',        icon: <List      size={14} aria-hidden />, badge: bugs.length },
+    { id: 'clusters',  label: 'Error Clusters',  icon: <Layers    size={14} aria-hidden />, badge: stats.errorClusters.length },
+    { id: 'pipeline',  label: 'Pipeline',        icon: <Activity  size={14} aria-hidden />, badge: stuckCount > 0 ? stuckCount : undefined },
+    { id: 'developer', label: 'Developer',       icon: <Code2     size={14} aria-hidden /> },
+    { id: 'reports',   label: 'Reports',         icon: <FileText  size={14} aria-hidden /> },
   ]
+
+  const showJiraBanner    = jiraPendingCount > 0 && !dismissedBanners.has('jira')
+  const showPipelineBanner = stuckCount > 0 && !dismissedBanners.has('pipeline')
 
   return (
     <div style={S.root}>
+
+      {/* Alert banners — stacked */}
+      {showJiraBanner && (
+        <div role="alert" style={{
+          display:'flex', alignItems:'center', gap:8, padding:'7px 18px',
+          background:'rgba(245,158,11,.10)', borderBottom:'1px solid rgba(245,158,11,.25)',
+          fontSize:13, color:'var(--warning)', flexShrink:0,
+        }}>
+          <AlertTriangle size={14} aria-hidden />
+          <span>
+            <strong>{jiraPendingCount}</strong> bug{jiraPendingCount > 1 ? 's' : ''} failed to create a Jira ticket and need manual attention.
+          </span>
+          <button onClick={() => { navigateToBugs({ jiraPending: 'yes' }) }} style={{ marginLeft: 4, fontSize:12, fontWeight:600, color:'var(--warning)', background:'rgba(245,158,11,.15)', border:'1px solid rgba(245,158,11,.35)', borderRadius:'var(--r-sm)', padding:'2px 10px', cursor:'pointer' }}>
+            View affected bugs
+          </button>
+          <button onClick={() => dismissBanner('jira')} aria-label="Dismiss Jira pending alert" style={{ marginLeft:'auto', background:'none', color:'var(--tx-3)', cursor:'pointer', padding:2 }}>
+            <X size={13} />
+          </button>
+        </div>
+      )}
+
+      {showPipelineBanner && (
+        <div role="alert" style={{
+          display:'flex', alignItems:'center', gap:8, padding:'7px 18px',
+          background:'rgba(245,158,11,.10)', borderBottom:'1px solid rgba(245,158,11,.25)',
+          fontSize:13, color:'var(--warning)', flexShrink:0,
+        }}>
+          <AlertTriangle size={14} aria-hidden />
+          <span>Gemini queue has <strong>{stuckCount}</strong> bug{stuckCount > 1 ? 's' : ''} stuck for &gt;30 minutes — scheduler may be stalled.</span>
+          <button onClick={() => setActiveTab('pipeline')} style={{ marginLeft: 4, fontSize:12, fontWeight:600, color:'var(--warning)', background:'rgba(245,158,11,.15)', border:'1px solid rgba(245,158,11,.35)', borderRadius:'var(--r-sm)', padding:'2px 10px', cursor:'pointer' }}>
+            View pipeline
+          </button>
+          <button onClick={() => dismissBanner('pipeline')} aria-label="Dismiss pipeline stuck alert" style={{ marginLeft:'auto', background:'none', color:'var(--tx-3)', cursor:'pointer', padding:2 }}>
+            <X size={13} />
+          </button>
+        </div>
+      )}
+
       {/* Offline banner */}
       {online === false && (
         <div role="alert" style={{
@@ -257,7 +337,6 @@ export default function DashboardClient({ user, initialBugs }: Props) {
             </span>
           </div>
 
-          {/* Realtime indicator */}
           <span title={`Realtime: ${rtStatus}`} aria-label={`Live updates: ${rtStatus}`} style={{
             display:'flex', alignItems:'center', gap:5, fontSize:11, color:'var(--tx-3)',
           }}>
@@ -265,10 +344,10 @@ export default function DashboardClient({ user, initialBugs }: Props) {
             <span style={{ display:'none' }}>{rtStatus}</span>
           </span>
 
-          {/* Tab navigation */}
           <nav aria-label="Dashboard sections" style={S.nav}>
             {tabs.map(tab => {
               const active = activeTab === tab.id
+              const isPipelineAlert = tab.id === 'pipeline' && stuckCount > 0
               return (
                 <button
                   key={tab.id}
@@ -289,8 +368,8 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                   {tab.badge !== undefined && (
                     <span style={{
                       fontSize:10, fontWeight:700, padding:'1px 5px', borderRadius:10,
-                      background: active ? 'var(--orange)' : 'var(--surface-2)',
-                      color: active ? '#fff' : 'var(--tx-3)',
+                      background: isPipelineAlert ? 'var(--warning)' : active ? 'var(--orange)' : 'var(--surface-2)',
+                      color: isPipelineAlert ? '#000' : active ? '#fff' : 'var(--tx-3)',
                     }} aria-hidden>
                       {tab.badge}
                     </span>
@@ -302,7 +381,6 @@ export default function DashboardClient({ user, initialBugs }: Props) {
         </div>
 
         <div style={S.headerRight}>
-          {/* AI analysis button */}
           {selected.size > 0 && (
             <button
               onClick={() => setShowAI(true)}
@@ -312,41 +390,13 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                 background:'linear-gradient(135deg,#8b5cf6,#6d28d9)',
                 color:'#fff', borderRadius:'var(--r-md)',
                 padding:'6px 13px', fontSize:13, fontWeight:600,
-                transition:'opacity .15s', border:'none',
+                transition:'opacity .15s', border:'none', cursor:'pointer',
               }}
               onMouseEnter={e => (e.currentTarget as HTMLElement).style.opacity = '0.88'}
               onMouseLeave={e => (e.currentTarget as HTMLElement).style.opacity = '1'}
             >
               <Sparkles size={13} aria-hidden />
               Analyse {selected.size} with AI
-            </button>
-          )}
-
-          {/* Filter toggle (bugs tab only) */}
-          {activeTab === 'bugs' && (
-            <button
-              onClick={() => setShowFilters(v => !v)}
-              aria-label={`${showFilters ? 'Hide' : 'Show'} filters${activeFilterCount > 0 ? ` (${activeFilterCount} active)` : ''}`}
-              aria-pressed={showFilters}
-              style={{
-                display:'flex', alignItems:'center', gap:6,
-                background: showFilters ? 'var(--orange-dim)' : 'var(--surface-2)',
-                color: showFilters ? 'var(--orange)' : 'var(--tx-2)',
-                border:`1px solid ${showFilters ? 'rgba(249,115,22,.25)' : 'var(--border)'}`,
-                borderRadius:'var(--r-md)', padding:'6px 11px',
-                fontSize:12, fontWeight:500, transition:'all .15s',
-              }}
-            >
-              <SlidersHorizontal size={13} aria-hidden />
-              Filters
-              {activeFilterCount > 0 && (
-                <span style={{
-                  background:'var(--orange)', color:'#fff',
-                  borderRadius:10, padding:'1px 5px', fontSize:10, fontWeight:700
-                }} aria-hidden>
-                  {activeFilterCount}
-                </span>
-              )}
             </button>
           )}
 
@@ -381,7 +431,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
               display:'flex', alignItems:'center', gap:4,
               background:'transparent', color:'var(--tx-3)',
               border:'1px solid var(--border)', borderRadius:'var(--r-sm)',
-              padding:'5px 9px', fontSize:11, transition:'all .15s',
+              padding:'5px 9px', fontSize:11, transition:'all .15s', cursor:'pointer',
             }}
           >
             <LogOut size={12} aria-hidden /> Sign out
@@ -391,21 +441,17 @@ export default function DashboardClient({ user, initialBugs }: Props) {
 
       {/* Main body */}
       <div style={S.body}>
-        {activeTab === 'bugs' && showFilters && (
-          <ErrorBoundary label="Filter sidebar error">
-            <FilterSidebar bugs={parsedBugs} filters={filters} setFilters={setFilters} onClear={clearFilters} />
-          </ErrorBoundary>
-        )}
-
         <main style={{ flex:1, overflow:'hidden', display:'flex', flexDirection:'column' }} id="main-content">
           <ErrorBoundary label="Content area error">
             {activeTab === 'overview' && (
               <Overview
                 stats={stats}
                 bugs={parsedBugs}
-                onNavigateToBugs={(f) => { setFilters(prev => ({ ...prev, ...f })); setActiveTab('bugs') }}
+                onNavigateToBugs={navigateToBugs}
+                onNavigateToClusters={() => setActiveTab('clusters')}
               />
             )}
+
             {activeTab === 'bugs' && (
               <>
                 {/* Quick-filter chip strip */}
@@ -415,15 +461,13 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                   flexShrink: 0, flexWrap: 'wrap',
                 }}>
                   <span style={{ fontSize: 10, color: 'var(--tx-3)', fontWeight: 700, letterSpacing: '.07em', flexShrink: 0 }}>SEV</span>
-                  {([
-                    { id:'P1', color:'var(--p1)' }, { id:'P2', color:'var(--p2)' },
-                    { id:'P3', color:'var(--p3)' }, { id:'P4', color:'var(--p4)' },
-                  ] as const).map(({ id, color }) => {
+                  {(['P1','P2','P3','P4'] as const).map(id => {
+                    const colors: Record<string,string> = { P1:'var(--p1)', P2:'var(--p2)', P3:'var(--p3)', P4:'var(--p4)' }
+                    const color = colors[id]
                     const active = filters.severity.includes(id)
                     return (
                       <button key={id} onClick={() => setFilters(prev => ({
-                        ...prev,
-                        severity: prev.severity.includes(id) ? prev.severity.filter(s => s !== id) : [...prev.severity, id],
+                        ...prev, severity: active ? prev.severity.filter(s => s !== id) : [...prev.severity, id],
                       }))} style={{
                         padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 700,
                         background: active ? color + '22' : 'var(--surface-1)',
@@ -434,51 +478,43 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                     )
                   })}
 
-                  <div style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 3px', flexShrink: 0 }} />
+                  <div style={{ width:1, height:14, background:'var(--border)', margin:'0 3px', flexShrink:0 }} />
 
                   <span style={{ fontSize: 10, color: 'var(--tx-3)', fontWeight: 700, letterSpacing: '.07em', flexShrink: 0 }}>STATUS</span>
-                  {([
-                    { id:'pending',  color:'var(--warning)' },
-                    { id:'triaging', color:'var(--purple)'  },
-                    { id:'complete', color:'var(--success)' },
-                  ] as const).map(({ id, color }) => {
+                  {(['pending','triaging','complete'] as const).map(id => {
+                    const colors: Record<string,string> = { pending:'var(--warning)', triaging:'var(--purple)', complete:'var(--success)' }
+                    const color = colors[id]
                     const active = filters.status.includes(id)
                     return (
                       <button key={id} onClick={() => setFilters(prev => ({
-                        ...prev,
-                        status: prev.status.includes(id) ? prev.status.filter(s => s !== id) : [...prev.status, id],
+                        ...prev, status: active ? prev.status.filter(s => s !== id) : [...prev.status, id],
                       }))} style={{
                         padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
                         background: active ? color + '22' : 'var(--surface-1)',
                         color: active ? color : 'var(--tx-2)',
                         border: `1px solid ${active ? color + '66' : 'var(--border)'}`,
-                        cursor: 'pointer', transition: 'all .15s',
-                        textTransform: 'capitalize' as const,
+                        cursor: 'pointer', transition: 'all .15s', textTransform:'capitalize' as const,
                       }}>{id}</button>
                     )
                   })}
 
-                  <div style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 3px', flexShrink: 0 }} />
+                  <div style={{ width:1, height:14, background:'var(--border)', margin:'0 3px', flexShrink:0 }} />
 
-                  <span style={{ fontSize: 10, color: 'var(--tx-3)', fontWeight: 700, letterSpacing: '.07em', flexShrink: 0 }}>MODULE</span>
-                  {([
-                    { id:'WEB',            label:'WEB',   color:'var(--module-web)'   },
-                    { id:'APP',            label:'APP',   color:'var(--module-app)'   },
-                    { id:'BACKEND',        label:'BE',    color:'var(--module-be)'    },
-                    { id:'INFRASTRUCTURE', label:'INFRA', color:'var(--module-infra)' },
-                  ] as const).map(({ id, label, color }) => {
-                    const active = filters.module.includes(id)
+                  <span style={{ fontSize: 10, color: 'var(--tx-3)', fontWeight: 700, letterSpacing: '.07em', flexShrink: 0 }}>ROUTING</span>
+                  {(['BACKEND','MOBILE','WEB'] as const).map(id => {
+                    const colors: Record<string,string> = { BACKEND:'#a78bfa', MOBILE:'#2dd4bf', WEB:'#4ade80' }
+                    const color = colors[id]
+                    const active = filters.platform.includes(id)
                     return (
                       <button key={id} onClick={() => setFilters(prev => ({
-                        ...prev,
-                        module: prev.module.includes(id) ? prev.module.filter(m => m !== id) : [...prev.module, id],
+                        ...prev, platform: active ? prev.platform.filter(m => m !== id) : [...prev.platform, id],
                       }))} style={{
                         padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
                         background: active ? color + '22' : 'var(--surface-1)',
                         color: active ? color : 'var(--tx-2)',
                         border: `1px solid ${active ? color + '66' : 'var(--border)'}`,
                         cursor: 'pointer', transition: 'all .15s',
-                      }}>{label}</button>
+                      }}>{id}</button>
                     )
                   })}
 
@@ -502,12 +538,15 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                   onClearSelection={clearSelection}
                   sort={sort}
                   onSort={setSort}
-                  onDetail={b => setDetailBug(b as BugReport)}
+                  onDetail={b => setDetailBug(b)}
                   onClearFilters={clearFilters}
                   hasActiveFilters={activeFilterCount > 0}
+                  filters={filters}
+                  setFilters={setFilters}
                 />
               </>
             )}
+
             {activeTab === 'clusters' && (
               <BugClusters
                 clusters={stats.errorClusters}
@@ -515,12 +554,23 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                   setSelected(new Set(clusterBugs.map(b => b.report_id)))
                   setShowAI(true)
                 }}
-                onViewBug={b => setDetailBug(b as BugReport)}
+                onViewBug={b => setDetailBug(b)}
+                onNavigateToBugs={(pattern) => navigateToBugs({ search: pattern })}
               />
             )}
-            {activeTab === 'developer' && (
-              <DeveloperView bugs={parsedBugs} stats={stats} />
+
+            {activeTab === 'pipeline' && (
+              <PipelineTab />
             )}
+
+            {activeTab === 'developer' && (
+              <DeveloperView
+                bugs={parsedBugs}
+                stats={stats}
+                onViewBugs={(routing) => navigateToBugs({ platform: [routing] })}
+              />
+            )}
+
             {activeTab === 'reports' && (
               <Reports bugs={parsedBugs} stats={stats} />
             )}
@@ -528,7 +578,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
         </main>
       </div>
 
-      {/* Modals */}
+      {/* AI panel */}
       {showAI && (
         <AIAnalysisPanel
           bugs={selectedBugs}
@@ -536,8 +586,16 @@ export default function DashboardClient({ user, initialBugs }: Props) {
           onClose={() => setShowAI(false)}
         />
       )}
+
+      {/* Bug detail side panel */}
       {detailBug && (
-        <BugDetailModal bug={detailBug} onClose={() => setDetailBug(null)} />
+        <BugDetailPanel
+          bug={detailBug}
+          onClose={() => setDetailBug(null)}
+          onBugUpdated={(reportId, changes) => {
+            setBugs(prev => prev.map(b => b.report_id === reportId ? { ...b, ...changes } : b))
+          }}
+        />
       )}
     </div>
   )

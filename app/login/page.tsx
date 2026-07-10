@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { loginAction } from '@/app/actions/auth'
 import { Bug, User, Lock, AlertCircle, Loader2 } from 'lucide-react'
 
@@ -10,7 +9,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const router = useRouter()
 
   const handleLogin = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -20,13 +18,17 @@ export default function LoginPage() {
       const result = await loginAction(username, password)
       if (result.error) {
         setError(result.error)
-      } else {
-        router.push('/dashboard')
-        router.refresh()
+        setLoading(false)
+        return
       }
-    } catch (err: any) {
-      setError(err.message || 'Login failed')
-    } finally {
+      // Hard navigation on purpose: router.push()/refresh() are soft, client-side
+      // transitions that go through the Router Cache and can replay a stale
+      // pre-login redirect for /dashboard, bouncing back to /login even though
+      // the auth cookie was just set. A full navigation guarantees a fresh
+      // request with the cookie already committed, so the middleware sees it.
+      window.location.href = '/dashboard'
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Login failed')
       setLoading(false)
     }
   }

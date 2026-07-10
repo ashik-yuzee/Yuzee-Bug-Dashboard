@@ -20,12 +20,13 @@ import PipelineTab from './PipelineTab'
 import {
   Bug, LogOut, RefreshCw, Sparkles,
   BarChart3, List, Layers, WifiOff, Radio, Bell, Code2, FileText,
-  Activity, AlertTriangle, X
+  Activity, AlertTriangle, X, History
 } from 'lucide-react'
 import Reports from './Reports'
+import { isLegacy, LEGACY_CUTOFF_ISO } from '@/lib/utils'
 
 export type BugReport = {
-  id: string; report_id: string; source: string | null; reporter_email: string | null
+  report_id: string; source: string | null; reporter_email: string | null
   description: string | null; platform: string | null; app_version: string | null
   severity: string | null; ai_summary: string | null; jira_key: string | null
   jira_url: string | null; status: string | null; created_at: string
@@ -39,8 +40,53 @@ export type BugReport = {
   rollbar_project_id: string | null
   timestamp_utc: string | null
   environment: string | null
-  posthog_session_url: string | null
-  feature_flags: string | null
+  // Ownership / routing
+  assigned_owner: string | null
+  ownership_team: string | null
+  ownership_reason: string | null
+  ownership: string | null
+  ticket_action: string | null
+  // Ticketability / triage scoring
+  ticketability_score: number | null
+  evidence_score: number | null
+  impact_score: number | null
+  ticketability_confidence_score: number | null
+  ticketability_reason: string | null
+  triage_reasoning: string | null
+  review_reason: string | null
+  suppression_reason: string | null
+  is_critical_path: boolean | null
+  low_evidence: boolean | null
+  occurrence_count: number | null
+  // Request / technical shape
+  api_endpoint: string | null
+  http_method: string | null
+  request_body_shape: string | null
+  request_headers_shape: string | null
+  query_params_shape: string | null
+  frontend_route: string | null
+  previous_route: string | null
+  user_action: string | null
+  backend_service: string | null
+  downstream_service: string | null
+  downstream_endpoint: string | null
+  downstream_status: string | null
+  error_source: string | null
+  exception_class: string | null
+  operation: string | null
+  handler_method: string | null
+  controller: string | null
+  duration_ms: number | null
+  server_name: string | null
+  trace_id: string | null
+  page_url: string | null
+  cloudwatch_event_type: string | null
+  // Rollbar / CloudWatch identifiers
+  rollbar_project_type: string | null
+  rollbar_replay_api_path: string | null
+  cw_log_stream: string | null
+  cw_source_group: string | null
+  n8n_execution_id: string | null
 }
 
 export type GeminiQueueItem = {
@@ -48,7 +94,30 @@ export type GeminiQueueItem = {
   report_id: string
   status: 'queued' | 'processed' | 'stale' | 'failed'
   queued_at: string
+  started_at: string | null
+  finished_at: string | null
   processed_at: string | null
+  retry_count: number
+  error_message: string | null
+  n8n_execution_id: string | null
+  created_at: string
+}
+
+export type TriageFeedback = {
+  id: string
+  report_id: string
+  jira_key: string
+  error_class: string | null
+  endpoint_pattern: string | null
+  original_tier: string | null
+  original_category: string | null
+  original_owner: string | null
+  correct_tier: string | null
+  correct_category: string | null
+  correct_owner: string | null
+  correct_severity: string | null
+  correction_reason: string | null
+  source: string | null
   created_at: string
 }
 
@@ -71,6 +140,30 @@ export const BLANK_FILTERS: Filters = {
 interface AdminUser { email: string }
 interface Props { user: AdminUser; initialBugs: BugReport[] }
 
+function LegacyEmptyState({ onEnable }: { onEnable: () => void }) {
+  return (
+    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
+      <div style={{ textAlign: 'center', maxWidth: 420 }}>
+        <span style={{ fontSize: 34 }} aria-hidden>📭</span>
+        <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--tx-1)', marginTop: 12, marginBottom: 6 }}>
+          No live data yet
+        </p>
+        <p style={{ fontSize: 13, color: 'var(--tx-3)', lineHeight: 1.5, marginBottom: 16 }}>
+          Every bug report on file was reported before 10 Jul 2026 and is being treated as legacy data.
+          Enable the legacy toggle to view historical reports.
+        </p>
+        <button onClick={onEnable} style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 600,
+          color: 'var(--orange)', background: 'var(--orange-dim)', border: '1px solid rgba(249,115,22,.3)',
+          borderRadius: 'var(--r-md)', padding: '7px 16px', cursor: 'pointer',
+        }}>
+          Include legacy data (before Jul 10)
+        </button>
+      </div>
+    </div>
+  )
+}
+
 const S = {
   root: { display:'flex', flexDirection:'column', height:'100vh', overflow:'hidden', background:'var(--bg)' } as const,
   header: {
@@ -90,7 +183,7 @@ const S = {
 }
 
 export default function DashboardClient({ user, initialBugs }: Props) {
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(), [])
   const { online } = useNetworkStatus()
   const { newBugs, status: rtStatus, clearNewBugs } = useRealtimeBugs()
   const { stats: queueStats } = useGeminiQueue()
@@ -106,16 +199,12 @@ export default function DashboardClient({ user, initialBugs }: Props) {
   const [dismissedBanners, setDismissedBanners] = useState<Set<string>>(new Set())
   const prevOnline = useRef<boolean | null>(null)
 
-  useEffect(() => {
-    if (online === true && prevOnline.current === false) {
-      toast.info('Connection restored', 'Refreshing bug reports…')
-      handleRefresh()
-    }
-    if (online === false && prevOnline.current !== false) {
-      toast.warning('You are offline', 'Data may be stale. Changes will resume when reconnected.')
-    }
-    prevOnline.current = online
-  }, [online])
+  // Legacy toggle: default ON only when there's no live (post-cutoff) data yet,
+  // so the dashboard isn't empty on first load before real live data exists.
+  const [includeLegacy, setIncludeLegacy] = useState<boolean>(() => {
+    const hasNonLegacy = initialBugs.some(b => new Date(b.created_at).getTime() >= new Date(LEGACY_CUTOFF_ISO).getTime())
+    return !hasNonLegacy
+  })
 
   const handleRefresh = useCallback(async () => {
     if (refreshing) return
@@ -143,7 +232,18 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     } finally {
       setRefreshing(false)
     }
-  }, [refreshing])
+  }, [refreshing, supabase, clearNewBugs])
+
+  useEffect(() => {
+    if (online === true && prevOnline.current === false) {
+      toast.info('Connection restored', 'Refreshing bug reports…')
+      handleRefresh()
+    }
+    if (online === false && prevOnline.current !== false) {
+      toast.warning('You are offline', 'Data may be stale. Changes will resume when reconnected.')
+    }
+    prevOnline.current = online
+  }, [online, handleRefresh])
 
   const handleSignOut = () => logoutAction()
 
@@ -155,9 +255,15 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     })
     clearNewBugs()
     toast.success(`${newBugs.length} new bug${newBugs.length > 1 ? 's' : ''} added`)
-  }, [newBugs])
+  }, [newBugs, clearNewBugs])
 
-  const parsedBugs = useMemo(() => bugs.map(parseBug), [bugs])
+  const visibleBugs = useMemo(
+    () => includeLegacy ? bugs : bugs.filter(b => !isLegacy(b)),
+    [bugs, includeLegacy]
+  )
+  const legacyEmpty = !includeLegacy && visibleBugs.length === 0 && bugs.length > 0
+
+  const parsedBugs = useMemo(() => visibleBugs.map(parseBug), [visibleBugs])
   const stats = useMemo(() => computeStats(parsedBugs), [parsedBugs])
 
   const jiraPendingCount = useMemo(() => parsedBugs.filter(b => b.jira_pending === true).length, [parsedBugs])
@@ -210,7 +316,11 @@ export default function DashboardClient({ user, initialBugs }: Props) {
   const selectedBugs = useMemo(() => filtered.filter(b => selected.has(b.report_id)), [filtered, selected])
 
   const toggleSelect    = useCallback((id: string) => {
-    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+    setSelected(prev => {
+      const n = new Set(prev)
+      if (n.has(id)) n.delete(id); else n.add(id)
+      return n
+    })
   }, [])
   const selectAll       = useCallback(() => {
     setSelected(selected.size === filtered.length ? new Set() : new Set(filtered.map(b => b.report_id)))
@@ -239,7 +349,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { id: 'overview',  label: 'Overview',       icon: <BarChart3 size={14} aria-hidden /> },
-    { id: 'bugs',      label: 'All Bugs',        icon: <List      size={14} aria-hidden />, badge: bugs.length },
+    { id: 'bugs',      label: 'All Bugs',        icon: <List      size={14} aria-hidden />, badge: visibleBugs.length },
     { id: 'clusters',  label: 'Error Clusters',  icon: <Layers    size={14} aria-hidden />, badge: stats.errorClusters.length },
     { id: 'pipeline',  label: 'Pipeline',        icon: <Activity  size={14} aria-hidden />, badge: stuckCount > 0 ? stuckCount : undefined },
     { id: 'developer', label: 'Developer',       icon: <Code2     size={14} aria-hidden /> },
@@ -401,6 +511,35 @@ export default function DashboardClient({ user, initialBugs }: Props) {
           )}
 
           <button
+            onClick={() => setIncludeLegacy(v => !v)}
+            aria-pressed={includeLegacy}
+            aria-label="Toggle legacy data (before Jul 10)"
+            title="Legacy data is any bug reported before 10 Jul 2026"
+            style={{
+              display:'flex', alignItems:'center', gap:6,
+              background: includeLegacy ? 'var(--orange-dim)' : 'var(--surface-2)',
+              color: includeLegacy ? 'var(--orange)' : 'var(--tx-2)',
+              border: `1px solid ${includeLegacy ? 'rgba(249,115,22,.3)' : 'var(--border)'}`,
+              borderRadius:'var(--r-md)', padding:'6px 11px', fontSize:12,
+              cursor:'pointer', transition:'all .15s',
+            }}
+          >
+            <History size={13} aria-hidden />
+            <span>Include legacy data (before Jul 10)</span>
+            <span aria-hidden style={{
+              width:26, height:14, borderRadius:99, position:'relative', flexShrink:0,
+              background: includeLegacy ? 'var(--orange)' : 'var(--surface-3)', transition:'background .15s',
+            }}>
+              <span style={{
+                position:'absolute', top:1, left: includeLegacy ? 13 : 1, width:12, height:12,
+                borderRadius:'50%', background:'#fff', transition:'left .15s',
+              }} />
+            </span>
+          </button>
+
+          <div style={S.divider} aria-hidden />
+
+          <button
             onClick={handleRefresh}
             disabled={refreshing || online === false}
             aria-label="Refresh bug reports"
@@ -444,15 +583,22 @@ export default function DashboardClient({ user, initialBugs }: Props) {
         <main style={{ flex:1, overflow:'hidden', display:'flex', flexDirection:'column' }} id="main-content">
           <ErrorBoundary label="Content area error">
             {activeTab === 'overview' && (
-              <Overview
-                stats={stats}
-                bugs={parsedBugs}
-                onNavigateToBugs={navigateToBugs}
-                onNavigateToClusters={() => setActiveTab('clusters')}
-              />
+              legacyEmpty ? <LegacyEmptyState onEnable={() => setIncludeLegacy(true)} /> : (
+                <Overview
+                  stats={stats}
+                  bugs={parsedBugs}
+                  includeLegacy={includeLegacy}
+                  onNavigateToBugs={navigateToBugs}
+                  onNavigateToClusters={() => setActiveTab('clusters')}
+                />
+              )
             )}
 
-            {activeTab === 'bugs' && (
+            {activeTab === 'bugs' && legacyEmpty && (
+              <LegacyEmptyState onEnable={() => setIncludeLegacy(true)} />
+            )}
+
+            {activeTab === 'bugs' && !legacyEmpty && (
               <>
                 {/* Quick-filter chip strip */}
                 <div style={{
@@ -531,7 +677,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
 
                 <BugTable
                   bugs={filtered}
-                  total={bugs.length}
+                  total={visibleBugs.length}
                   selected={selected}
                   onToggle={toggleSelect}
                   onSelectAll={selectAll}

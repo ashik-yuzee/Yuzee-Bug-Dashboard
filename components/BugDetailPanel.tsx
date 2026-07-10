@@ -1,16 +1,19 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import type { ParsedBug } from '@/lib/bugUtils'
 import {
   getField, parseLabels, parseFeatureFlags, buildCloudWatchUrl,
   rollbarUrl, jiraUrl, formatTimestamp, relativeTime, ROUTING_COLORS,
+  getReporterIdentity, getUserAgentString, parseUserAgent, deriveOS,
 } from '@/lib/utils'
+import { useJiraStatuses } from '@/hooks/useJiraStatuses'
 import { createClient } from '@/lib/supabase/client'
+import type { GeminiQueueItem, TriageFeedback } from '@/components/DashboardClient'
 import toast from '@/lib/toast'
 import {
   X, ExternalLink, Copy, Check, AlertTriangle, Cloud,
-  Play, Link2, RefreshCw, CheckCircle2, GitMerge,
+  Play, Link2, RefreshCw, CheckCircle2, GitMerge, ChevronDown,
 } from 'lucide-react'
 
 interface Props {
@@ -29,6 +32,40 @@ function Section({ title, sub, children }: { title: string; sub?: string; childr
         {sub && <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 'normal', marginLeft: 6, color: 'var(--tx-3)' }}>{sub}</span>}
       </p>
       {children}
+    </div>
+  )
+}
+
+/** A field grid row that renders nothing when the value is null/empty — used for the
+ * "only render fields that actually have data" prominent + collapsible sections. */
+function FieldRow({ label, value }: { label: string; value: string | number | null | undefined }) {
+  if (value === null || value === undefined || value === '') return null
+  return (
+    <div style={{ display: 'flex', gap: 8 }}>
+      <span style={{ fontSize: 11, color: 'var(--tx-3)', fontWeight: 600, minWidth: 120, flexShrink: 0 }}>{label}</span>
+      <span style={{ fontSize: 11, color: 'var(--tx-2)', wordBreak: 'break-word' }}>{value}</span>
+    </div>
+  )
+}
+
+function Collapsible({ title, fields }: { title: string; fields: [string, string | number | null | undefined][] }) {
+  const [open, setOpen] = useState(false)
+  const populated = fields.filter(([, v]) => v !== null && v !== undefined && v !== '')
+  if (populated.length === 0) return null
+  return (
+    <div style={{ marginBottom: 20, border: '1px solid var(--border)', borderRadius: 'var(--r-md)', overflow: 'hidden' }}>
+      <button onClick={() => setOpen(o => !o)} style={{
+        width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        background: 'var(--surface-2)', border: 'none', padding: '8px 12px', cursor: 'pointer',
+      }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--tx-2)', letterSpacing: '.05em', textTransform: 'uppercase' }}>{title}</span>
+        <ChevronDown size={13} color="var(--tx-3)" style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }} aria-hidden />
+      </button>
+      {open && (
+        <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {populated.map(([label, value]) => <FieldRow key={label} label={label} value={value} />)}
+        </div>
+      )}
     </div>
   )
 }
@@ -86,6 +123,25 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
     return () => document.removeEventListener('keydown', handler)
   }, [onClose])
 
+  // Backfill missing reporter/environment/exception_class/server_name from a live Rollbar
+  // lookup (rollbar_id required) and persist it, so it's retained instead of re-fetched.
+  useEffect(() => {
+    if (!bug.rollbar_id) return
+    const needsEnrichment = !bug.reporter_email || !bug.environment || !bug.exception_class || !bug.server_name
+    if (!needsEnrichment) return
+
+    let cancelled = false
+    fetch(`/api/enrich-bug?report_id=${encodeURIComponent(bug.report_id)}`, { method: 'PATCH' })
+      .then(res => res.json())
+      .then(data => {
+        if (cancelled || !data?.enriched) return
+        onBugUpdated?.(bug.report_id, data.updates)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bug.report_id, bug.rollbar_id])
+
   const sevCol = SEV_COL[bug.severity || ''] || 'var(--tx-2)'
   const routeStyle = bug.routingToken ? ROUTING_COLORS[bug.routingToken] : null
 
@@ -94,7 +150,7 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
   const cwUrl = buildCloudWatchUrl(bug)
   const rbUrl = rollbarUrl(bug)
   const jiraLink = jiraUrl(bug.jira_key)
-  const sessionReplayUrl = (getField(bug, 'posthog_session_url') || bug.posthog_session_url) as string | null
+  const sessionReplayUrl = getField(bug, 'posthog_session_url') as string | null
 
   const fullParsed = (() => {
     try { return typeof bug.full_data === 'string' ? JSON.parse(bug.full_data) : bug.full_data }
@@ -106,7 +162,39 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
 
   const confidence = getField(bug, 'confidence') as number | null
 
+  const reporter = getReporterIdentity(bug)
+  const ua = parseUserAgent(getUserAgentString(bug))
+  const os = deriveOS(bug)
+  const jiraKeysForStatus = useMemo(() => [bug.jira_key], [bug.jira_key])
+  const { statuses: jiraStatuses } = useJiraStatuses(jiraKeysForStatus)
+  const jiraStatus = bug.jira_key ? jiraStatuses[bug.jira_key] : undefined
+
   const supabase = createClient()
+
+  // AI pipeline status for this report — gemini_queue rows + any human triage_feedback corrections.
+  const [queueRows, setQueueRows] = useState<GeminiQueueItem[]>([])
+  const [feedbackRows, setFeedbackRows] = useState<TriageFeedback[]>([])
+  const [pipelineLoading, setPipelineLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setPipelineLoading(true)
+      try {
+        const [queueRes, feedbackRes] = await Promise.all([
+          supabase.from('gemini_queue').select('*').eq('report_id', bug.report_id).order('created_at', { ascending: false }),
+          supabase.from('triage_feedback').select('*').or(`report_id.eq.${bug.report_id}${bug.jira_key ? `,jira_key.eq.${bug.jira_key}` : ''}`),
+        ])
+        if (cancelled) return
+        setQueueRows((queueRes.data || []) as GeminiQueueItem[])
+        setFeedbackRows((feedbackRes.data || []) as TriageFeedback[])
+      } catch { /* ignore */ }
+      finally { if (!cancelled) setPipelineLoading(false) }
+    }
+    load()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bug.report_id, bug.jira_key])
 
   const handleRequeue = useCallback(async () => {
     setActing('requeue')
@@ -129,14 +217,14 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
       const { error } = await supabase
         .from('bug_reports')
         .update({ status: 'resolved' })
-        .eq('id', bug.id)
+        .eq('report_id', bug.report_id)
       if (error) throw error
       toast.success('Marked resolved', bug.report_id)
       onBugUpdated?.(bug.report_id, { status: 'resolved' })
     } catch (err) {
       toast.error('Update failed', err instanceof Error ? err.message : 'Unknown')
     } finally { setActing(null) }
-  }, [bug.id, bug.report_id, supabase, onBugUpdated])
+  }, [bug.report_id, supabase, onBugUpdated])
 
   const handleMarkDuplicate = useCallback(async () => {
     setActing('duplicate')
@@ -144,14 +232,14 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
       const { error } = await supabase
         .from('bug_reports')
         .update({ is_duplicate: true })
-        .eq('id', bug.id)
+        .eq('report_id', bug.report_id)
       if (error) throw error
       toast.success('Marked duplicate', bug.report_id)
       onBugUpdated?.(bug.report_id, { is_duplicate: true })
     } catch (err) {
       toast.error('Update failed', err instanceof Error ? err.message : 'Unknown')
     } finally { setActing(null) }
-  }, [bug.id, bug.report_id, supabase, onBugUpdated])
+  }, [bug.report_id, supabase, onBugUpdated])
 
   return (
     <div
@@ -227,6 +315,17 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
             />
           </div>
 
+          {/* Reporter & Device */}
+          <Section title="Reporter & Device">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' }}>
+              <FieldRow label="User" value={reporter || '—'} />
+              <FieldRow label="Jira Status" value={bug.jira_key ? (jiraStatus?.status ?? 'loading…') : '—'} />
+              <FieldRow label="Device Model" value={ua.deviceModel || '—'} />
+              <FieldRow label="OS" value={os} />
+              <FieldRow label="Browser" value={ua.browser || '—'} />
+            </div>
+          </Section>
+
           {/* AI Triage */}
           <Section title="AI Triage" sub="gemini-2.0-flash-lite">
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px', marginBottom: 10 }}>
@@ -264,6 +363,56 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
                   <span key={l} style={{ fontSize: 11, fontWeight: 500, padding: '2px 9px', borderRadius: 20, background: 'var(--surface-2)', color: l.includes('human-review') ? 'var(--warning)' : 'var(--tx-2)', border: '1px solid var(--border)' }}>
                     {l}
                   </span>
+                ))}
+              </div>
+            )}
+          </Section>
+
+          {/* Ownership & Routing */}
+          <Section title="Ownership & Routing">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' }}>
+              <FieldRow label="Assigned owner" value={bug.assigned_owner} />
+              <FieldRow label="Ownership team" value={bug.ownership_team} />
+              <FieldRow label="Ticket action" value={bug.ticket_action} />
+              <FieldRow label="Occurrences" value={bug.occurrence_count} />
+              <FieldRow label="API endpoint" value={bug.api_endpoint} />
+              <FieldRow label="Error source" value={bug.error_source} />
+              <FieldRow label="Exception class" value={bug.exception_class} />
+              <FieldRow label="Backend service" value={bug.backend_service} />
+              <FieldRow label="Frontend route" value={bug.frontend_route} />
+              <FieldRow label="Page URL" value={bug.page_url} />
+            </div>
+          </Section>
+
+          {/* AI Pipeline Status */}
+          <Section title="AI Pipeline Status" sub="gemini_queue · triage_feedback">
+            {pipelineLoading ? (
+              <div className="skeleton" style={{ height: 40, borderRadius: 6 }} />
+            ) : queueRows.length === 0 && feedbackRows.length === 0 ? (
+              <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No queue history for this report</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {queueRows.map(q => (
+                  <div key={q.id} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--surface-2)', borderRadius: 'var(--r-sm)' }}>
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 99, textTransform: 'uppercase',
+                      color: q.status === 'processed' ? 'var(--success)' : q.status === 'failed' ? 'var(--danger)' : q.status === 'stale' ? 'var(--tx-3)' : 'var(--info)',
+                      background: q.status === 'processed' ? 'rgba(63,185,80,.10)' : q.status === 'failed' ? 'rgba(255,123,114,.10)' : q.status === 'stale' ? 'var(--surface-3)' : 'rgba(88,166,255,.10)',
+                    }}>{q.status}</span>
+                    <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>queued {relativeTime(q.queued_at)}</span>
+                    {q.processed_at && <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>processed {relativeTime(q.processed_at)}</span>}
+                    {q.retry_count > 0 && <span style={{ fontSize: 11, color: 'var(--warning)' }}>{q.retry_count} retries</span>}
+                    {q.error_message && <span style={{ fontSize: 11, color: 'var(--danger)' }} title={q.error_message}>{q.error_message.slice(0, 60)}</span>}
+                  </div>
+                ))}
+                {feedbackRows.map(f => (
+                  <div key={f.id} style={{ padding: '6px 10px', background: 'rgba(163,113,247,.06)', border: '1px solid rgba(163,113,247,.15)', borderRadius: 'var(--r-sm)' }}>
+                    <p style={{ fontSize: 11, color: 'var(--purple)', fontWeight: 600, marginBottom: 2 }}>Human correction</p>
+                    <p style={{ fontSize: 11, color: 'var(--tx-2)' }}>
+                      {f.original_tier && f.correct_tier && f.original_tier !== f.correct_tier && `${f.original_tier} → ${f.correct_tier}`}
+                      {f.correction_reason && ` — ${f.correction_reason}`}
+                    </p>
+                  </div>
                 ))}
               </div>
             )}
@@ -386,6 +535,29 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
               )}
             </Section>
           )}
+
+          {/* Collapsed-by-default diagnostic detail */}
+          <Collapsible title="Triage Reasoning & Scores" fields={[
+            ['Triage reasoning', bug.triage_reasoning],
+            ['Ticketability score', bug.ticketability_score],
+            ['Evidence score', bug.evidence_score],
+            ['Impact score', bug.impact_score],
+            ['Ticketability confidence', bug.ticketability_confidence_score],
+            ['Ticketability reason', bug.ticketability_reason],
+            ['Review reason', bug.review_reason],
+            ['Ownership reason', bug.ownership_reason],
+            ['Suppression reason', bug.suppression_reason],
+          ]} />
+
+          <Collapsible title="Request / Technical Shape" fields={[
+            ['Request body shape', bug.request_body_shape],
+            ['Request headers shape', bug.request_headers_shape],
+            ['Query params shape', bug.query_params_shape],
+            ['CloudWatch log stream', bug.cw_log_stream],
+            ['CloudWatch source group', bug.cw_source_group],
+            ['Rollbar replay API path', bug.rollbar_replay_api_path],
+            ['n8n execution ID', bug.n8n_execution_id],
+          ]} />
 
           {/* Timestamps */}
           <Section title="Timestamps">

@@ -16,46 +16,54 @@ export interface JiraTicket {
 }
 
 export interface JiraSpacesData {
-  ysdp: JiraTicket[]
-  ysdpTotal: number
   ysc: JiraTicket[]
-  yscTotal: number
+  yscIsLast: boolean
   ysdt: JiraTicket[]
-  ysdtTotal: number
+  ysdtIsLast: boolean
   lastFetched: string | null
 }
 
 const EMPTY: JiraSpacesData = {
-  ysdp: [], ysdpTotal: 0,
-  ysc: [], yscTotal: 0,
-  ysdt: [], ysdtTotal: 0,
+  ysc: [], yscIsLast: true,
+  ysdt: [], ysdtIsLast: true,
   lastFetched: null,
+}
+
+async function fetchSpacesData(): Promise<{ data: JiraSpacesData; error: string | null }> {
+  try {
+    const res = await fetch('/api/jira/spaces')
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
+    }
+    const json = await res.json() as JiraSpacesData
+    return { data: json, error: null }
+  } catch (err) {
+    return { data: EMPTY, error: err instanceof Error ? err.message : 'Failed to load Jira spaces' }
+  }
 }
 
 export function useJiraSpaces() {
   const [data, setData] = useState<JiraSpacesData>(EMPTY)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [refreshToken, setRefreshToken] = useState(0)
 
-  const fetchSpaces = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await fetch('/api/jira/spaces')
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`)
-      }
-      const json = await res.json() as JiraSpacesData
-      setData(json)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load Jira spaces')
-    } finally {
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setLoading(true)
+      const result = await fetchSpacesData()
+      if (cancelled) return
+      if (result.error === null) setData(result.data)
+      setError(result.error)
       setLoading(false)
     }
-  }, [])
+    load()
+    return () => { cancelled = true }
+  }, [refreshToken])
 
-  useEffect(() => { fetchSpaces() }, [fetchSpaces])
+  const refresh = useCallback(() => setRefreshToken(t => t + 1), [])
 
-  return { data, loading, error, refresh: fetchSpaces }
+  return { data, loading, error, refresh }
 }

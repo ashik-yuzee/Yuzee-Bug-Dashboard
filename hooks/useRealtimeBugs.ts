@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import type { BugReport } from '@/components/DashboardClient'
 
@@ -15,7 +15,7 @@ interface UseRealtimeBugsResult {
 export function useRealtimeBugs(): UseRealtimeBugsResult {
   const [newBugs, setNewBugs] = useState<BugReport[]>([])
   const [status, setStatus] = useState<RealtimeStatus>('connecting')
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(), [])
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 
   useEffect(() => {
@@ -39,7 +39,7 @@ export function useRealtimeBugs(): UseRealtimeBugsResult {
     return () => {
       supabase.removeChannel(channel).catch(() => {})
     }
-  }, [])
+  }, [supabase])
 
   const clearNewBugs = () => setNewBugs([])
 

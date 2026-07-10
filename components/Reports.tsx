@@ -111,6 +111,8 @@ function buildResolutionRate(bugs: ParsedBug[], weeks: number) {
 }
 
 export default function Reports({ bugs }: Props) {
+  // Captured once per mount rather than read live during render (react-hooks/purity).
+  const [nowMs] = useState(() => Date.now())
   const [timeRange, setTimeRange] = useState<TimeRange>('30d')
   const [aiSummary, setAiSummary]   = useState('')
   const [aiLoading, setAiLoading]   = useState(false)
@@ -210,8 +212,6 @@ Be specific, actionable, and professional. No fluff.`
         setAiSummary(`Error: ${(err as Error).message}`)
     } finally { setAiLoading(false) }
   }, [s, filtered, timeRange])
-
-  const userBugs = filtered.filter(b => b.source === 'user_report' || b.source === 'yuzee_app')
 
   const maxMod = s.moduleBreakdown[0]?.count || 1
   const maxEnv = s.environmentBreakdown[0]?.count || 1
@@ -346,8 +346,7 @@ Be specific, actionable, and professional. No fluff.`
               const triagedAt = new Date(b.triaged_at!).getTime()
               const days = Math.round((triagedAt - t) / 86_400_000 * 10) / 10
               if (days < 0 || days > 30) continue
-              const now = Date.now()
-              const weeksAgo = Math.floor((now - t) / (7 * 86_400_000))
+              const weeksAgo = Math.floor((nowMs - t) / (7 * 86_400_000))
               const wk = `W-${Math.min(weeksAgo, 11)}`
               if (!weeks[wk]) weeks[wk] = { sum: 0, count: 0 }
               weeks[wk].sum += days
@@ -489,7 +488,7 @@ Be specific, actionable, and professional. No fluff.`
           )}
           {!aiSummary && !aiLoading && (
             <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>
-              Click "Generate Report" to get an AI-generated standup summary.
+              Click &quot;Generate Report&quot; to get an AI-generated standup summary.
             </p>
           )}
         </div>

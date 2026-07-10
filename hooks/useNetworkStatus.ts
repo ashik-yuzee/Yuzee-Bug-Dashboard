@@ -3,10 +3,11 @@
 import { useEffect, useState } from 'react'
 
 export function useNetworkStatus() {
-  const [online, setOnline] = useState<boolean | null>(null)
+  // Lazy initializer reads the real value on first client render; stays null through SSR
+  // (navigator is unavailable there). The effect only subscribes — it never sets state itself.
+  const [online, setOnline] = useState<boolean | null>(() => typeof navigator !== 'undefined' ? navigator.onLine : null)
 
   useEffect(() => {
-    setOnline(navigator.onLine)
     const up   = () => setOnline(true)
     const down = () => setOnline(false)
     window.addEventListener('online',  up)

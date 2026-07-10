@@ -3,8 +3,8 @@ import { checkAuth } from '@/lib/apiAuth'
 
 const ROLLBAR_BASE = 'https://api.rollbar.com/api/1'
 
-function getToken(module: string): string {
-  if (module === 'APP' || module === 'BACKEND') {
+function getToken(rollbarModule: string): string {
+  if (rollbarModule === 'APP' || rollbarModule === 'BACKEND') {
     return process.env.ROLLBAR_READ_APP || ''
   }
   return process.env.ROLLBAR_READ_WEB || ''
@@ -16,15 +16,15 @@ export async function GET(req: NextRequest) {
 
   const { searchParams } = new URL(req.url)
   const itemId = searchParams.get('itemId')
-  const module = searchParams.get('module') || 'WEB'
+  const rollbarModule = searchParams.get('module') || 'WEB'
 
   if (!itemId) return NextResponse.json({ error: 'itemId is required' }, { status: 400 })
 
-  const token = getToken(module)
+  const token = getToken(rollbarModule)
   if (!token) return NextResponse.json({ error: 'Rollbar token not configured' }, { status: 503 })
 
   // Also get the alternate token in case the item is in the other project
-  const altToken = (module === 'APP' || module === 'BACKEND')
+  const altToken = (rollbarModule === 'APP' || rollbarModule === 'BACKEND')
     ? (process.env.ROLLBAR_READ_WEB || '')
     : (process.env.ROLLBAR_READ_APP || '')
 
@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Try primary token, then alternate (handles module misclassification between projects)
+    // Try primary token, then alternate (handles rollbarModule misclassification between projects)
     let itemRes = await tryFetch(token)
     let activeToken = token
     if (!itemRes && altToken && altToken !== token) {
@@ -90,7 +90,7 @@ export async function GET(req: NextRequest) {
         platform: item.platform,
         framework: item.framework,
         language: item.language,
-        url: `https://rollbar.com/${process.env.ROLLBAR_ACCOUNT}/${module === 'APP' ? 'yuzee-app' : 'yuzee-web'}/items/${item.counter}`,
+        url: `https://rollbar.com/${process.env.ROLLBAR_ACCOUNT}/${rollbarModule === 'APP' ? 'yuzee-app' : 'yuzee-web'}/items/${item.counter}`,
       },
       stackFrames,
       instances: instances.slice(0, 5).map((inst: { id: string; timestamp: number; data?: { request?: { url?: string; method?: string }; server?: { host?: string }; person?: { email?: string } } }) => ({

@@ -1,12 +1,16 @@
 'use client'
 
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import type { ParsedBug } from '@/lib/bugUtils'
 import type { BugReport, SortConfig, Filters } from './DashboardClient'
-import { relativeTime, formatTimestamp, jiraUrl, rollbarUrl, ROUTING_COLORS } from '@/lib/utils'
+import {
+  relativeTime, formatTimestamp, jiraUrl, rollbarUrl, ROUTING_COLORS,
+  getReporterIdentity, getUserAgentString, parseUserAgent, deriveOS, isLegacy,
+} from '@/lib/utils'
+import { useJiraStatuses } from '@/hooks/useJiraStatuses'
 import {
   ChevronUp, ChevronDown, ChevronsUpDown, ExternalLink, AlertTriangle,
-  RefreshCw, Check, Copy, X, Search, ChevronLeft, ChevronRight,
+  Check, Copy, X, Search, ChevronLeft, ChevronRight, History,
 } from 'lucide-react'
 
 const PAGE_SIZE = 25
@@ -21,12 +25,9 @@ interface Props {
 
 const SEV_COL: Record<string, string> = { P1: 'var(--p1)', P2: 'var(--p2)', P3: 'var(--p3)', P4: 'var(--p4)' }
 
-const STATUS: Record<string, { bg: string; color: string }> = {
-  complete: { bg: 'rgba(63,185,80,.10)',  color: 'var(--success)' },
-  pending:  { bg: 'rgba(227,179,65,.10)', color: 'var(--warning)' },
-  triaging: { bg: 'rgba(163,113,247,.10)',color: 'var(--purple)'  },
-  triaged:  { bg: 'rgba(88,166,255,.10)', color: 'var(--info)'    },
-  resolved: { bg: 'rgba(63,185,80,.08)',  color: 'var(--success)' },
+/** aria-sort belongs on the <th role="columnheader"> element, not the button inside it. */
+function ariaSortFor(sort: SortConfig, col: keyof BugReport): 'ascending' | 'descending' | 'none' {
+  return sort.key === col ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'
 }
 
 function SortBtn({ col, sort, onSort, label }: { col: keyof BugReport; sort: SortConfig; onSort: (s: SortConfig) => void; label: string }) {
@@ -35,7 +36,6 @@ function SortBtn({ col, sort, onSort, label }: { col: keyof BugReport; sort: Sor
     <button
       onClick={() => onSort({ key: col, dir: sort.key === col && sort.dir === 'asc' ? 'desc' : 'asc' })}
       aria-label={`Sort by ${label}`}
-      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
       style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '6px 8px', fontSize: 10, fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase', color: active ? 'var(--orange)' : 'var(--tx-3)', background: 'none', border: 'none', cursor: 'pointer', whiteSpace: 'nowrap' }}
     >
       {label}
@@ -72,16 +72,33 @@ function DropFilter({ label, value, options, onChange, active }: { label: string
   )
 }
 
+function jiraStatusColor(statusCategory: string): string {
+  const l = statusCategory.toLowerCase()
+  if (l === 'done') return 'var(--success)'
+  if (l.includes('progress')) return 'var(--info)'
+  return 'var(--tx-3)'
+}
+
 export default function BugTable({ bugs, total, selected, onToggle, onSelectAll, onClearSelection, sort, onSort, onDetail, onClearFilters, hasActiveFilters, filters, setFilters }: Props) {
   const [page, setPage] = useState(1)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
+  const { statuses: jiraStatuses } = useJiraStatuses(useMemo(() => bugs.map(b => b.jira_key), [bugs]))
+
   const allChecked = bugs.length > 0 && selected.size === bugs.length
   const someChecked = selected.size > 0 && !allChecked
 
-  // Reset to page 1 when filters change
-  useEffect(() => { setPage(1) }, [bugs.length, filters])
+  // Reset to page 1 when filters change — adjusted during render (react.dev "Adjusting
+  // state when a prop changes"), not in an effect, so it takes effect before the paint
+  // that shows stale out-of-range rows.
+  const [prevBugsLength, setPrevBugsLength] = useState(bugs.length)
+  const [prevFilters, setPrevFilters] = useState(filters)
+  if (bugs.length !== prevBugsLength || filters !== prevFilters) {
+    setPrevBugsLength(bugs.length)
+    setPrevFilters(filters)
+    setPage(1)
+  }
 
   const pageCount = Math.max(1, Math.ceil(bugs.length / PAGE_SIZE))
   const pageBugs = useMemo(() => bugs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [bugs, page])
@@ -210,22 +227,24 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
             </div>
           </div>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1100 }} role="table">
+          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1450 }} role="table">
             <thead>
               <tr style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 10 }}>
                 <th scope="col" style={{ padding: '7px 10px', width: 32 }}>
                   <Checkbox checked={allChecked} indeterminate={someChecked} onClick={onSelectAll} label="Select all" />
                 </th>
-                <th scope="col" style={{ padding: 0, width: 64 }}><SortBtn col="severity" sort={sort} onSort={onSort} label="Sev" /></th>
-                <th scope="col" style={{ padding: 0, width: 88 }}><SortBtn col="platform" sort={sort} onSort={onSort} label="Platform" /></th>
-                <th scope="col" style={{ padding: 0, width: 96 }}><SortBtn col="component" sort={sort} onSort={onSort} label="Component" /></th>
+                <th scope="col" aria-sort={ariaSortFor(sort, 'severity')} style={{ padding: 0, width: 64 }}><SortBtn col="severity" sort={sort} onSort={onSort} label="Sev" /></th>
+                <th scope="col" aria-sort={ariaSortFor(sort, 'platform')} style={{ padding: 0, width: 88 }}><SortBtn col="platform" sort={sort} onSort={onSort} label="Platform" /></th>
+                <th scope="col" aria-sort={ariaSortFor(sort, 'component')} style={{ padding: 0, width: 96 }}><SortBtn col="component" sort={sort} onSort={onSort} label="Component" /></th>
                 <th scope="col" style={{ padding: '7px 10px', fontSize: 10, fontWeight: 600, color: 'var(--tx-3)', letterSpacing: '.06em', textTransform: 'uppercase' }}>Description</th>
-                <th scope="col" style={{ padding: 0, width: 94 }}><SortBtn col="source" sort={sort} onSort={onSort} label="Source" /></th>
-                <th scope="col" style={{ padding: 0, width: 88 }}><SortBtn col="environment" sort={sort} onSort={onSort} label="Env" /></th>
-                <th scope="col" style={{ padding: 0, width: 96 }}><SortBtn col="jira_key" sort={sort} onSort={onSort} label="Jira" /></th>
+                <th scope="col" aria-sort={ariaSortFor(sort, 'source')} style={{ padding: 0, width: 94 }}><SortBtn col="source" sort={sort} onSort={onSort} label="Source" /></th>
+                <th scope="col" style={{ padding: '7px 10px', fontSize: 10, fontWeight: 600, color: 'var(--tx-3)', letterSpacing: '.06em', textTransform: 'uppercase', width: 130 }}>User</th>
+                <th scope="col" style={{ padding: '7px 10px', fontSize: 10, fontWeight: 600, color: 'var(--tx-3)', letterSpacing: '.06em', textTransform: 'uppercase', width: 140 }}>Device</th>
+                <th scope="col" aria-sort={ariaSortFor(sort, 'environment')} style={{ padding: 0, width: 88 }}><SortBtn col="environment" sort={sort} onSort={onSort} label="Env" /></th>
+                <th scope="col" aria-sort={ariaSortFor(sort, 'jira_key')} style={{ padding: 0, width: 110 }}><SortBtn col="jira_key" sort={sort} onSort={onSort} label="Jira" /></th>
                 <th scope="col" style={{ padding: '7px 10px', fontSize: 10, fontWeight: 600, color: 'var(--tx-3)', letterSpacing: '.06em', textTransform: 'uppercase', width: 44 }}>RB</th>
-                <th scope="col" style={{ padding: 0, width: 96 }}><SortBtn col="timestamp_utc" sort={sort} onSort={onSort} label="Time" /></th>
-                <th scope="col" style={{ padding: '7px 8px', fontSize: 10, fontWeight: 600, color: 'var(--tx-3)', letterSpacing: '.06em', textTransform: 'uppercase', width: 44 }}>Flags</th>
+                <th scope="col" aria-sort={ariaSortFor(sort, 'timestamp_utc')} style={{ padding: 0, width: 96 }}><SortBtn col="timestamp_utc" sort={sort} onSort={onSort} label="Time" /></th>
+                <th scope="col" style={{ padding: '7px 8px', fontSize: 10, fontWeight: 600, color: 'var(--tx-3)', letterSpacing: '.06em', textTransform: 'uppercase', width: 54 }}>Flags</th>
                 <th scope="col" style={{ padding: '7px 8px', width: 36 }}><span className="sr-only">View</span></th>
               </tr>
             </thead>
@@ -233,11 +252,15 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
               {pageBugs.map((bug, i) => {
                 const isSelected = selected.has(bug.report_id)
                 const sevCol = SEV_COL[bug.severity || ''] || 'var(--tx-3)'
-                const st = STATUS[bug.status || ''] || { bg: 'rgba(125,133,144,.08)', color: 'var(--tx-3)' }
                 const routeStyle = bug.routingToken ? ROUTING_COLORS[bug.routingToken] : null
                 const jiraLink = jiraUrl(bug.jira_key)
                 const rbLink = rollbarUrl(bug)
                 const rowBg = isSelected ? 'rgba(249,115,22,.05)' : i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,.01)'
+                const reporter = getReporterIdentity(bug)
+                const ua = parseUserAgent(getUserAgentString(bug))
+                const os = deriveOS(bug)
+                const legacy = isLegacy(bug)
+                const jiraStatus = bug.jira_key ? jiraStatuses[bug.jira_key] : undefined
 
                 return (
                   <tr key={bug.report_id}
@@ -290,6 +313,23 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
                       </span>
                     </td>
 
+                    <td style={{ padding: '8px 10px', maxWidth: 130, overflow: 'hidden' }}>
+                      <span style={{ fontSize: 11, color: reporter ? 'var(--tx-2)' : 'var(--tx-3)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={reporter || undefined}>
+                        {reporter || '—'}
+                      </span>
+                    </td>
+
+                    <td style={{ padding: '8px 10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 3, color: 'var(--tx-2)', background: 'var(--surface-2)', whiteSpace: 'nowrap' }}>{os}</span>
+                        {(ua.deviceModel || ua.browser) && (
+                          <span style={{ fontSize: 10, color: 'var(--tx-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={[ua.deviceModel, ua.browser].filter(Boolean).join(' · ')}>
+                            {[ua.deviceModel, ua.browser].filter(Boolean).join(' · ')}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+
                     <td style={{ padding: '8px 10px' }}>
                       {bug.environment ? (
                         <span style={{ fontSize: 10, padding: '2px 5px', borderRadius: 3, color: bug.environment === 'production' ? 'var(--danger)' : 'var(--tx-3)', background: bug.environment === 'production' ? 'var(--danger-dim)' : 'var(--surface-2)', fontWeight: bug.environment === 'production' ? 600 : 400 }}>
@@ -304,10 +344,15 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
                           <AlertTriangle size={11} aria-hidden />⚠ failed
                         </span>
                       ) : bug.jira_key ? (
-                        <a href={jiraLink || '#'} target="_blank" rel="noopener noreferrer"
-                          style={{ display: 'flex', alignItems: 'center', gap: 3, fontFamily: 'monospace', fontSize: 11, fontWeight: 600, color: 'var(--info)', whiteSpace: 'nowrap' }}>
-                          {bug.jira_key} <ExternalLink size={9} aria-hidden />
-                        </a>
+                        <div>
+                          <a href={jiraLink || '#'} target="_blank" rel="noopener noreferrer"
+                            style={{ display: 'flex', alignItems: 'center', gap: 3, fontFamily: 'monospace', fontSize: 11, fontWeight: 600, color: 'var(--info)', whiteSpace: 'nowrap' }}>
+                            {bug.jira_key} <ExternalLink size={9} aria-hidden />
+                          </a>
+                          {jiraStatus && (
+                            <span style={{ fontSize: 9, fontWeight: 600, color: jiraStatusColor(jiraStatus.statusCategory) }}>{jiraStatus.status}</span>
+                          )}
+                        </div>
                       ) : <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>—</span>}
                     </td>
 
@@ -333,6 +378,15 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
                         )}
                         {bug.jira_pending && (
                           <span title="Jira ticket failed" style={{ fontSize: 12 }} aria-label="Jira pending">⚠️</span>
+                        )}
+                        {legacy && (
+                          <span title="Legacy — reported before 10 Jul 2026" aria-label="Legacy" style={{
+                            display: 'flex', alignItems: 'center', gap: 2, fontSize: 9, fontWeight: 700,
+                            color: 'var(--tx-3)', background: 'var(--surface-2)', border: '1px solid var(--border)',
+                            padding: '1px 5px', borderRadius: 3,
+                          }}>
+                            <History size={9} aria-hidden /> Legacy
+                          </span>
                         )}
                       </div>
                     </td>

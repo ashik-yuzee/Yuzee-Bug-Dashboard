@@ -1,28 +1,114 @@
 import type { BugReport } from '@/components/DashboardClient'
 
+/**
+ * full_data is double-encoded: the column itself is a JSON string whose
+ * `.full_data` property is a *second* JSON string containing the real
+ * `{ headers, params, query, body }` intake payload. Both layers must be
+ * unwrapped to reach things like `context.user_id` or the `user-agent` header.
+ */
+function parseFullDataLayers(record: BugReport): { outer: Record<string, unknown> | null; inner: Record<string, unknown> | null } {
+  let outer: Record<string, unknown> | null = null
+  try {
+    outer = (typeof record.full_data === 'string' ? JSON.parse(record.full_data) : record.full_data) as Record<string, unknown> | null
+  } catch { outer = null }
+
+  let inner: Record<string, unknown> | null = null
+  try {
+    const innerRaw = (outer as Record<string, unknown> | null)?.full_data
+    inner = (typeof innerRaw === 'string' ? JSON.parse(innerRaw) : innerRaw) as Record<string, unknown> | null
+  } catch { inner = null }
+
+  return { outer, inner }
+}
+
 export function getField(record: BugReport, key: string): unknown {
   const direct = record[key as keyof BugReport]
   if (direct !== null && direct !== undefined) return direct
-  try {
-    const full = typeof record.full_data === 'string'
-      ? JSON.parse(record.full_data)
-      : record.full_data
-    return full?.[key] ?? full?.body?.[key] ?? null
-  } catch { return null }
+  const { outer, inner } = parseFullDataLayers(record)
+  const outerBody = outer?.body as Record<string, unknown> | undefined
+  const innerBody = inner?.body as Record<string, unknown> | undefined
+  const innerCtx = innerBody?.context as Record<string, unknown> | undefined
+  return outer?.[key] ?? outerBody?.[key] ?? innerBody?.[key] ?? innerCtx?.[key] ?? null
+}
+
+/** Raw user-agent string from the intake request headers, if captured. */
+export function getUserAgentString(record: BugReport): string | null {
+  const { outer, inner } = parseFullDataLayers(record)
+  const innerHeaders = inner?.headers as Record<string, unknown> | undefined
+  const outerHeaders = outer?.headers as Record<string, unknown> | undefined
+  const ua = innerHeaders?.['user-agent'] ?? outerHeaders?.['user-agent'] ?? null
+  return typeof ua === 'string' ? ua : null
+}
+
+const BOT_UA = /^(python-requests|axios|curl|PostmanRuntime|okhttp|Go-http-client)/i
+
+/** Best-effort browser + device model parse from a raw user-agent string. */
+export function parseUserAgent(ua: string | null): { browser: string | null; deviceModel: string | null } {
+  if (!ua || BOT_UA.test(ua)) return { browser: null, deviceModel: null }
+
+  let browser: string | null = null
+  if (/Edg\//.test(ua)) browser = 'Edge'
+  else if (/Chrome\//.test(ua) && !/Edg\//.test(ua)) browser = 'Chrome'
+  else if (/Firefox\//.test(ua)) browser = 'Firefox'
+  else if (/SamsungBrowser\//.test(ua)) browser = 'Samsung Internet'
+  else if (/Safari\//.test(ua) && /Version\//.test(ua)) browser = 'Safari'
+
+  let deviceModel: string | null = null
+  if (/iPhone/.test(ua)) deviceModel = 'iPhone'
+  else if (/iPad/.test(ua)) deviceModel = 'iPad'
+  else if (/iPod/.test(ua)) deviceModel = 'iPod'
+  else {
+    const androidMatch = ua.match(/Android[^;]*;\s*([^)]+)\)/)
+    if (androidMatch) deviceModel = androidMatch[1].split('Build/')[0].trim()
+    else if (/Macintosh/.test(ua)) deviceModel = 'Mac'
+    else if (/Windows/.test(ua)) deviceModel = 'Windows PC'
+  }
+
+  return { browser, deviceModel }
+}
+
+/** OS label derived from platform + rollbar_project_type + source, per the dashboard spec. */
+export function deriveOS(record: BugReport): string {
+  const plat = (record.platform || '').toLowerCase()
+  const rpt = ((getField(record, 'rollbar_project_type') as string) || '').toLowerCase()
+  if (plat === 'ios') return 'iOS'
+  if (plat === 'android') return 'Android'
+  if (plat === 'browser' || rpt === 'rollbar-web') return 'Website'
+  if (plat === 'linux' || plat === 'server' || rpt === 'rollbar-java') return 'Server'
+  if (record.source === 'cloudwatch_poller') return 'Server'
+  return record.platform || '—'
+}
+
+/** reporter_email, falling back to full_data.context.user_id — null for automated sources. */
+export function getReporterIdentity(record: BugReport): string | null {
+  if (record.reporter_email) return record.reporter_email
+  const uid = getField(record, 'user_id')
+  return uid ? String(uid) : null
+}
+
+/** Legacy data cutoff — records before this are considered historical. */
+export const LEGACY_CUTOFF_ISO = '2026-07-10T00:00:00Z'
+
+export function isLegacy(record: BugReport): boolean {
+  return new Date(record.created_at).getTime() < new Date(LEGACY_CUTOFF_ISO).getTime()
 }
 
 export function parseLabels(record: BugReport): string[] {
   const raw = getField(record, 'labels')
   if (!raw) return []
-  try { return typeof raw === 'string' ? JSON.parse(raw) : (raw as string[]) }
-  catch { return [] }
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+    return Array.isArray(parsed) ? parsed : []
+  } catch { return [] }
 }
 
 export function parseFeatureFlags(record: BugReport): Record<string, unknown> {
   const raw = getField(record, 'feature_flags')
   if (!raw) return {}
-  try { return typeof raw === 'string' ? JSON.parse(raw) : (raw as Record<string, unknown>) }
-  catch { return {} }
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+  } catch { return {} }
 }
 
 export function deriveRoutingToken(record: BugReport): 'BACKEND' | 'MOBILE' | 'WEB' | null {

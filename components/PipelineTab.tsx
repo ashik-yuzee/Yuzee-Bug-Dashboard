@@ -37,6 +37,34 @@ function fmtTs(ts: string | null) {
   return new Date(ts).toLocaleString('en-AU', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
+/* ─── Data quality fetch (pure — no component state) ────────── */
+async function fetchDataQualityCounts(): Promise<Record<string, number>> {
+  const supabase = createClient()
+  const [
+    missingCorrel,
+    jiraPendingCount,
+    aiSummaryNull,
+    unknownComp,
+    missingSev,
+    missingJiraNotPending,
+  ] = await Promise.all([
+    supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('correlation_id', null).eq('source', 'rollbar_auto'),
+    supabase.from('bug_reports').select('*', { count: 'exact', head: true }).eq('jira_pending', true),
+    supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('ai_summary', null),
+    supabase.from('bug_reports').select('*', { count: 'exact', head: true }).eq('component', 'Unknown'),
+    supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('severity', null),
+    supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('jira_key', null).not('status', 'eq', 'pending').not('is_duplicate', 'eq', true).is('jira_pending', null),
+  ])
+  return {
+    missingCorrel: missingCorrel.count ?? 0,
+    jiraPending: jiraPendingCount.count ?? 0,
+    aiSummaryNull: aiSummaryNull.count ?? 0,
+    unknownComp: unknownComp.count ?? 0,
+    missingSev: missingSev.count ?? 0,
+    missingJiraNotPending: missingJiraNotPending.count ?? 0,
+  }
+}
+
 /* ─── Data quality row ─────────────────────────────────────── */
 interface QualityRow { issue: string; count: number | null; loading: boolean; action?: () => Promise<void>; actionLabel?: string }
 
@@ -86,39 +114,23 @@ export default function PipelineTab() {
   // Data quality state
   const [dq, setDq] = useState<Record<string, number | null>>({})
   const [dqLoading, setDqLoading] = useState(true)
+  const [dqRefreshToken, setDqRefreshToken] = useState(0)
 
-  const fetchDataQuality = useCallback(async () => {
-    setDqLoading(true)
-    const supabase = createClient()
-    try {
-      const [
-        missingCorrel,
-        jiraPendingCount,
-        aiSummaryNull,
-        unknownComp,
-        missingSev,
-        missingJiraNotPending,
-      ] = await Promise.all([
-        supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('correlation_id', null).eq('source', 'rollbar_auto'),
-        supabase.from('bug_reports').select('*', { count: 'exact', head: true }).eq('jira_pending', true),
-        supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('ai_summary', null),
-        supabase.from('bug_reports').select('*', { count: 'exact', head: true }).eq('component', 'Unknown'),
-        supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('severity', null),
-        supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('jira_key', null).not('status', 'eq', 'pending').not('is_duplicate', 'eq', true).is('jira_pending', null),
-      ])
-      setDq({
-        missingCorrel: missingCorrel.count ?? 0,
-        jiraPending: jiraPendingCount.count ?? 0,
-        aiSummaryNull: aiSummaryNull.count ?? 0,
-        unknownComp: unknownComp.count ?? 0,
-        missingSev: missingSev.count ?? 0,
-        missingJiraNotPending: missingJiraNotPending.count ?? 0,
-      })
-    } catch { /* ignore */ }
-    finally { setDqLoading(false) }
-  }, [])
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setDqLoading(true)
+      try {
+        const counts = await fetchDataQualityCounts()
+        if (!cancelled) setDq(counts)
+      } catch { /* ignore */ }
+      finally { if (!cancelled) setDqLoading(false) }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [dqRefreshToken])
 
-  useEffect(() => { fetchDataQuality() }, [fetchDataQuality])
+  const refreshDataQuality = useCallback(() => setDqRefreshToken(t => t + 1), [])
 
   const requeueSingle = async (item: GeminiQueueItem) => {
     setRequeuingId(item.id)
@@ -289,7 +301,7 @@ export default function PipelineTab() {
             <p style={{ fontWeight: 600, fontSize: 13, color: 'var(--tx-1)' }}>Data Quality</p>
             <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 2 }}>Pipeline integrity checks across all bug reports</p>
           </div>
-          <button onClick={fetchDataQuality} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--tx-3)', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '4px 9px', cursor: 'pointer' }}>
+          <button onClick={refreshDataQuality} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--tx-3)', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '4px 9px', cursor: 'pointer' }}>
             <RefreshCw size={11} /> Refresh
           </button>
         </div>

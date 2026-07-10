@@ -2,19 +2,20 @@
 
 import { useState, useMemo } from 'react'
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts'
 import type { DashboardStats, ParsedBug } from '@/lib/bugUtils'
+import { computeStats } from '@/lib/bugUtils'
 import { useGeminiQueue } from '@/hooks/useGeminiQueue'
 import JiraSpacesPanel from './JiraSpacesPanel'
 import {
   AlertTriangle, TrendingUp, Zap, Info, RefreshCw,
   ArrowUpRight, ArrowDownRight, Minus, CheckCircle2,
   Radio, Cpu, Activity, Cloud, Globe, Server, Smartphone,
-  Database, Package, AlertCircle, GitBranch, BarChart2,
+  Database, Package, BarChart2,
   Link, XCircle,
 } from 'lucide-react'
-import { ROUTING_COLORS, jiraUrl } from '@/lib/utils'
+import { ROUTING_COLORS, jiraUrl, getField } from '@/lib/utils'
 
 /* ─── design tokens (mirrors globals.css) ───────────────────────── */
 const SEV: Record<string, string> = {
@@ -25,6 +26,28 @@ const CHART_FILL: Record<string, string> = {
 }
 
 type DayRange = 7 | 14 | 30
+type RangeFilter = 'week' | 'month' | '3months' | 'year' | 'all'
+
+const RANGE_LABELS: Record<RangeFilter, string> = {
+  week: 'This Week', month: 'This Month', '3months': 'Last 3 Months', year: 'This Year', all: 'All Time',
+}
+
+function rangeCutoff(range: RangeFilter, nowMs: number): Date | null {
+  const now = new Date(nowMs)
+  switch (range) {
+    case 'week': {
+      const d = new Date(now)
+      const dayIdx = (d.getDay() + 6) % 7 // Monday-start week
+      d.setDate(d.getDate() - dayIdx)
+      d.setHours(0, 0, 0, 0)
+      return d
+    }
+    case 'month':    return new Date(now.getFullYear(), now.getMonth(), 1)
+    case '3months':  return new Date(now.getFullYear(), now.getMonth() - 3, now.getDate())
+    case 'year':     return new Date(now.getFullYear(), 0, 1)
+    case 'all':      return null
+  }
+}
 
 /* ─── atoms ─────────────────────────────────────────────────────── */
 
@@ -311,15 +334,39 @@ function PipelineWidget() {
 }
 
 /* ─── main ──────────────────────────────────────────────────────── */
-export default function Overview({ stats, bugs, onNavigateToBugs, onNavigateToClusters }: {
+export default function Overview({ stats: _globalStats, bugs: allBugs, includeLegacy, onNavigateToBugs, onNavigateToClusters }: {
   stats: DashboardStats
   bugs: ParsedBug[]
+  includeLegacy: boolean
   onNavigateToBugs: (f: Record<string, string[] | string>) => void
   onNavigateToClusters?: () => void
 }) {
+  void _globalStats // superseded by the range-scoped `stats` computed below
+
+  // Captured once per mount rather than read live during render — Date.now() is an
+  // impure call and must not be invoked directly in the render body (react-hooks/purity).
+  const [nowMs] = useState(() => Date.now())
+
   const [dayRange, setDayRange] = useState<DayRange>(30)
 
-  const cutoff    = new Date(Date.now() - dayRange * 86_400_000).toISOString().slice(0, 10)
+  // Overview-wide time filter — affects every stat card and chart below.
+  // Re-defaults whenever the legacy toggle flips (adjusting state on prop change,
+  // done during render rather than in an effect — see react.dev "you might not need an effect").
+  const [range, setRange] = useState<RangeFilter>(() => includeLegacy ? 'all' : 'month')
+  const [prevIncludeLegacy, setPrevIncludeLegacy] = useState(includeLegacy)
+  if (includeLegacy !== prevIncludeLegacy) {
+    setPrevIncludeLegacy(includeLegacy)
+    setRange(includeLegacy ? 'all' : 'month')
+  }
+
+  const rangeStart = useMemo(() => rangeCutoff(range, nowMs), [range, nowMs])
+  const bugs = useMemo(
+    () => rangeStart ? allBugs.filter(b => new Date(b.timestamp_utc || b.created_at) >= rangeStart) : allBugs,
+    [allBugs, rangeStart]
+  )
+  const stats = useMemo(() => computeStats(bugs), [bugs])
+
+  const cutoff    = new Date(nowMs - dayRange * 86_400_000).toISOString().slice(0, 10)
   const chartDays = stats.dailyVolume.filter(d => d.date >= cutoff)
 
   const dateRange = useMemo(() => {
@@ -328,8 +375,8 @@ export default function Overview({ stats, bugs, onNavigateToBugs, onNavigateToCl
     return `${fmt(stats.dailyVolume[0].date)} – ${fmt(stats.dailyVolume[stats.dailyVolume.length - 1].date)}`
   }, [stats.dailyVolume])
 
-  const todayStr     = new Date().toISOString().slice(0, 10)
-  const yesterdayStr = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+  const todayStr     = new Date(nowMs).toISOString().slice(0, 10)
+  const yesterdayStr = new Date(nowMs - 86_400_000).toISOString().slice(0, 10)
   const todayCount   = useMemo(() => bugs.filter(b => (b.timestamp_utc || b.created_at).slice(0,10) === todayStr).length,     [bugs, todayStr])
   const yestCount    = useMemo(() => bugs.filter(b => (b.timestamp_utc || b.created_at).slice(0,10) === yesterdayStr).length, [bugs, yesterdayStr])
   const dupRate      = stats.total > 0 ? Math.round((stats.duplicateCount / stats.total) * 100) : 0
@@ -341,7 +388,7 @@ export default function Overview({ stats, bugs, onNavigateToBugs, onNavigateToCl
     const rb = sl.filter(b => b.rollbar_id || b.rollbarItemId).length
     const cw = sl.filter(b => b.correlation_id).length
     const ai = sl.filter(b => b.ai_summary).length
-    const ph = sl.filter(b => b.posthog_session_url).length
+    const ph = sl.filter(b => getField(b, 'posthog_session_url')).length
     return {
       rollbar:    { pct: Math.round(rb/n*100), n: rb },
       cloudwatch: { pct: Math.round(cw/n*100), n: cw },
@@ -365,20 +412,101 @@ export default function Overview({ stats, bugs, onNavigateToBugs, onNavigateToCl
     <div style={{ flex: 1, overflowY: 'auto', background: 'var(--bg)' }}>
       <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 24 }}>
 
-        {/* 1 ── KPI CARDS ──────────────────────────────────────── */}
+        {/* 1 ── CRITICAL SUMMARY (top of page, minimal, no walls of numbers) ── */}
         <section>
-          <Divider label="At a Glance" />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10, marginTop: 12 }}>
-            <Kpi label="Total Bugs"     value={stats.total}            sub={dateRange}                                                      icon={<BarChart2     size={14}/>} delta={{ n: todayCount - yestCount, label: 'vs yesterday' }} />
-            <Kpi label="P1 Critical"    value={stats.p1count}          sub="needs immediate fix"         accent="#ef4444" alert={stats.p1count > 0}  icon={<AlertCircle   size={14}/>} onClick={() => onNavigateToBugs({ severity: ['P1'] })} />
-            <Kpi label="P2 High"        value={stats.p2count}          sub={`${stats.total > 0 ? Math.round(stats.p2count/stats.total*100) : 0}% of total`} accent="#e3b341" icon={<AlertTriangle size={14}/>} onClick={() => onNavigateToBugs({ severity: ['P2'] })} />
-            <Kpi label="No Jira Ticket" value={stats.pendingNoJira}    sub={`${stats.pendingNoJira} missing · ${stats.jiraPendingCount} failed`}  accent="#a371f7" icon={<GitBranch    size={14}/>} onClick={() => onNavigateToBugs({ hasJira: 'no' })} />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
+            <Divider label="Critical Summary" />
+            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+              {(Object.keys(RANGE_LABELS) as RangeFilter[]).map(r => (
+                <button key={r} onClick={() => setRange(r)} style={{
+                  padding: '4px 11px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                  background: range === r ? 'var(--orange)' : 'var(--surface-2)',
+                  color:      range === r ? '#fff'          : 'var(--tx-2)',
+                  border:     `1px solid ${range === r ? 'var(--orange)' : 'var(--border)'}`,
+                  cursor: 'pointer', transition: 'all .12s', fontFamily: 'inherit', whiteSpace: 'nowrap',
+                }}>{RANGE_LABELS[r]}</button>
+              ))}
+            </div>
           </div>
+
+          <Card pad={16}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 18 }}>
+              {/* Severity */}
+              <div>
+                <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>Severity</p>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {(['P1', 'P2', 'P3', 'P4'] as const).map(s => {
+                    const n = bugs.filter(b => b.severity === s).length
+                    return (
+                      <button key={s} onClick={() => onNavigateToBugs({ severity: [s] })} style={{
+                        display: 'flex', alignItems: 'center', gap: 5, padding: '3px 9px', borderRadius: 20,
+                        background: n > 0 ? SEV[s] + '18' : 'var(--surface-2)',
+                        border: `1px solid ${n > 0 ? SEV[s] + '35' : 'var(--border)'}`,
+                        cursor: 'pointer', fontFamily: 'inherit',
+                      }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: n > 0 ? SEV[s] : 'var(--tx-3)' }}>{s}</span>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: n > 0 ? SEV[s] : 'var(--tx-3)' }}>{n}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Source (counts only, no percentages) */}
+              <div>
+                <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>Source</p>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  {([
+                    ['Rollbar', bugs.filter(b => b.source === 'rollbar_auto').length],
+                    ['CloudWatch', bugs.filter(b => b.source === 'cloudwatch_poller').length],
+                    ['User-reported', bugs.filter(b => b.source === 'user_report' || b.source === 'yuzee_app').length],
+                  ] as [string, number][]).map(([label, n]) => (
+                    <div key={label}>
+                      <p style={{ fontSize: 16, fontWeight: 800, color: 'var(--tx-1)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{n}</p>
+                      <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>{label}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Jira coverage */}
+              <div onClick={() => onNavigateToBugs({ hasJira: 'no' })} style={{ cursor: 'pointer' }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>Jira Coverage</p>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div>
+                    <p style={{ fontSize: 16, fontWeight: 800, color: '#3fb950', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{bugs.filter(b => !!b.jira_key).length}</p>
+                    <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>Have ticket</p>
+                  </div>
+                  <div>
+                    <p style={{ fontSize: 16, fontWeight: 800, color: stats.pendingNoJira > 0 ? '#e3b341' : 'var(--tx-1)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{stats.pendingNoJira}</p>
+                    <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>Missing</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Pending / in-review */}
+              <div onClick={() => onNavigateToBugs({ status: ['pending'] })} style={{ cursor: 'pointer' }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>Pending / In Review</p>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div>
+                    <p style={{ fontSize: 16, fontWeight: 800, color: 'var(--tx-1)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{bugs.filter(b => b.status === 'pending').length}</p>
+                    <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>Pending</p>
+                  </div>
+                  <div>
+                    <p style={{ fontSize: 16, fontWeight: 800, color: stats.needsHumanReview > 0 ? '#58a6ff' : 'var(--tx-1)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{stats.needsHumanReview}</p>
+                    <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>In review</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Secondary health row — smaller, subordinate to the summary above */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10, marginTop: 10 }}>
-            <Kpi label="Resolved"       value={`${stats.resolvedRate}%`} sub={`${bugs.filter(b => b.status === 'complete').length} complete`} accent="#3fb950"  icon={<CheckCircle2  size={14}/>} trendGood />
-            <Kpi label="Needs Review"   value={stats.needsHumanReview} sub="AI low-confidence"           accent="#58a6ff"                                        icon={<Info          size={14}/>} />
-            <Kpi label="Duplicates"     value={stats.duplicateCount}   sub={`${dupRate}% total · ${stats.rollbarDuplicateCount} Rollbar · ${stats.sameTicketCount} same-ticket`} accent="#6b7280" icon={<Link size={14}/>} onClick={onNavigateToClusters} />
-            <Kpi label="Jira Pending"   value={stats.jiraPendingCount} sub="ticket creation failed"      warning={stats.jiraPendingCount > 0}                   icon={<XCircle       size={14}/>} onClick={() => onNavigateToBugs({ jiraPending: 'yes' })} />
+            <Kpi label="Total Bugs"   value={stats.total}              sub={dateRange}                                icon={<BarChart2    size={14}/>} delta={{ n: todayCount - yestCount, label: 'vs yesterday' }} />
+            <Kpi label="Resolved"     value={`${stats.resolvedRate}%`} sub={`${bugs.filter(b => b.status === 'complete').length} complete`} accent="#3fb950" icon={<CheckCircle2 size={14}/>} trendGood />
+            <Kpi label="Duplicates"   value={stats.duplicateCount}     sub={`${dupRate}% total · ${stats.rollbarDuplicateCount} Rollbar`}    accent="#6b7280" icon={<Link         size={14}/>} onClick={onNavigateToClusters} />
+            <Kpi label="Jira Pending" value={stats.jiraPendingCount}    sub="ticket creation failed"                   warning={stats.jiraPendingCount > 0} icon={<XCircle      size={14}/>} onClick={() => onNavigateToBugs({ jiraPending: 'yes' })} />
           </div>
         </section>
 
@@ -733,21 +861,21 @@ export default function Overview({ stats, bugs, onNavigateToBugs, onNavigateToCl
 
             <Card pad={16}>
               <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>Report Sources</p>
-              <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Where reports originate</p>
-              {stats.sourceBreakdown.length === 0
+              <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Where reports originate — counts only, all data comes from n8n automations</p>
+              {bugs.length === 0
                 ? <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No source data yet</p>
-                : stats.sourceBreakdown.map(s => {
-                    const maxS = stats.sourceBreakdown[0].count
-                    const col  = s.source === 'rollbar_auto' ? 'var(--info)' : s.source === 'user_report' ? 'var(--warning)' : 'var(--orange)'
-                    return (
-                      <div key={s.source} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                        <span style={{ width: 84, fontSize: 11, color: 'var(--tx-2)', textTransform: 'capitalize', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.source.replace(/_/g, ' ')}</span>
-                        <ProgressBar pct={(s.count / maxS) * 100} color={col} />
-                        <span style={{ fontSize: 11, color: 'var(--tx-2)', fontVariantNumeric: 'tabular-nums', flexShrink: 0, minWidth: 24, textAlign: 'right' }}>{s.count}</span>
-                        <span style={{ fontSize: 10, color: 'var(--tx-3)', flexShrink: 0, minWidth: 30, textAlign: 'right' }}>{s.percentage}%</span>
+                : ([
+                    ['Rollbar', bugs.filter(b => b.source === 'rollbar_auto').length, 'var(--info)'],
+                    ['CloudWatch', bugs.filter(b => b.source === 'cloudwatch_poller').length, '#2dd4bf'],
+                    ['User-reported', bugs.filter(b => b.source === 'user_report' || b.source === 'yuzee_app').length, 'var(--warning)'],
+                  ] as [string, number, string][]).map(([label, n, col]) => (
+                    <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                      <span style={{ width: 96, fontSize: 11, color: 'var(--tx-2)', flexShrink: 0 }}>{label}</span>
+                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, padding: '3px 10px', background: n > 0 ? col + '14' : 'var(--surface-2)', border: `1px solid ${n > 0 ? col + '30' : 'var(--border)'}`, borderRadius: 20 }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: n > 0 ? col : 'var(--tx-3)', fontVariantNumeric: 'tabular-nums' }}>{n}</span>
                       </div>
-                    )
-                  })
+                    </div>
+                  ))
               }
               {/* Module mini-grid */}
               {stats.moduleBreakdown.length > 0 && (

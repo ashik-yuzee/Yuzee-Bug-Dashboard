@@ -1,116 +1,73 @@
 import { NextResponse } from 'next/server'
 import { checkAuth } from '@/lib/apiAuth'
+import { searchJiraJql, jiraConfigured, jiraBrowseUrl, type JiraSearchResult } from '@/lib/jiraClient'
 
-const JIRA_BASE  = process.env.JIRA_BASE_URL || 'https://yuzeeau.atlassian.net'
-const JIRA_EMAIL = process.env.JIRA_EMAIL    || ''
-const JIRA_KEY   = process.env.JIRA_API_KEY  || ''
+const SPACE_YSC  = process.env.JIRA_SPACE_YSC  || 'YSC'
+const SPACE_YSDT = process.env.JIRA_SPACE_YSDT || 'YSDT'
 
-function basicAuth() {
-  return 'Basic ' + Buffer.from(`${JIRA_EMAIL}:${JIRA_KEY}`).toString('base64')
+const FIELDS = ['summary', 'status', 'assignee', 'priority', 'labels', 'issuetype', 'created', 'updated']
+
+interface RawFields {
+  summary: string
+  status: { name: string; statusCategory: { name: string } }
+  priority: { name: string }
+  assignee: {
+    displayName: string
+    emailAddress: string
+    avatarUrls: Record<string, string>
+  } | null
+  created: string
+  updated: string
+  labels: string[]
 }
 
-const H = () => ({
-  Authorization: basicAuth(),
-  'Content-Type': 'application/json',
-  Accept: 'application/json',
-})
-
-interface JiraIssueRaw {
-  key: string
-  fields: {
-    summary: string
-    status: { name: string; statusCategory: { name: string } }
-    priority: { name: string }
-    assignee: {
-      displayName: string
-      emailAddress: string
-      avatarUrls: Record<string, string>
-    } | null
-    created: string
-    updated: string
-    labels: string[]
-    issuetype: { name: string }
-  }
-}
-
-interface JiraSearchResult {
-  issues: JiraIssueRaw[]
-  total: number
-}
-
-async function searchJira(jql: string, maxResults = 20): Promise<JiraSearchResult> {
-  const url =
-    `${JIRA_BASE}/rest/api/3/search` +
-    `?jql=${encodeURIComponent(jql)}` +
-    `&maxResults=${maxResults}` +
-    `&fields=summary,status,assignee,priority,labels,issuetype,created,updated`
-
-  const res = await fetch(url, { headers: H() })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Jira search ${res.status}: ${text.slice(0, 200)}`)
-  }
-  return res.json()
-}
-
-function normalize(issues: JiraIssueRaw[]) {
-  return issues.map(issue => ({
-    key: issue.key,
-    summary: issue.fields.summary,
-    status: issue.fields.status?.name ?? 'Unknown',
-    statusCategory: issue.fields.status?.statusCategory?.name ?? 'Unknown',
-    priority: issue.fields.priority?.name ?? 'Medium',
-    assignee: issue.fields.assignee
-      ? {
-          name: issue.fields.assignee.displayName,
-          email: issue.fields.assignee.emailAddress,
-          avatar: issue.fields.assignee.avatarUrls?.['24x24'] ?? '',
-        }
-      : null,
-    created: issue.fields.created,
-    updated: issue.fields.updated,
-    labels: issue.fields.labels ?? [],
-    url: `${JIRA_BASE}/browse/${issue.key}`,
-  }))
+function normalize(result: JiraSearchResult) {
+  return result.issues.map(issue => {
+    const f = issue.fields as unknown as RawFields
+    return {
+      key: issue.key,
+      summary: f.summary,
+      status: f.status?.name ?? 'Unknown',
+      statusCategory: f.status?.statusCategory?.name ?? 'Unknown',
+      priority: f.priority?.name ?? 'Medium',
+      assignee: f.assignee
+        ? {
+            name: f.assignee.displayName,
+            email: f.assignee.emailAddress,
+            avatar: f.assignee.avatarUrls?.['24x24'] ?? '',
+          }
+        : null,
+      created: f.created,
+      updated: f.updated,
+      labels: f.labels ?? [],
+      url: jiraBrowseUrl(issue.key),
+    }
+  })
 }
 
 /* GET /api/jira/spaces
- * Returns open tickets from YSDP (manual reports), YSC (auto P1–P3), and YSDT (dev tracking / escalated).
+ * Returns open tickets from YSC (auto-created, all severities) and YSDT
+ * (P0–P2 escalations assigned to developers).
  */
 export async function GET() {
   const denied = await checkAuth()
   if (denied) return denied
 
-  if (!JIRA_KEY) {
+  if (!jiraConfigured()) {
     return NextResponse.json({ error: 'Jira not configured — JIRA_API_KEY missing' }, { status: 503 })
   }
 
   try {
-    const [ysdpRes, yscRes, ysdtRes] = await Promise.all([
-      // YSDP — all open manual reports, newest first
-      searchJira(
-        'project = YSDP AND statusCategory != Done ORDER BY priority ASC, updated DESC',
-        25
-      ),
-      // YSC — open P1/P2/P3 only (P4 is noise at this view level), newest first
-      searchJira(
-        'project = YSC AND statusCategory != Done AND priority in (Highest, High, Medium) ORDER BY priority ASC, updated DESC',
-        25
-      ),
-      // YSDT — developer tracking board, P1/P2 escalated from YSC
-      searchJira(
-        'project = YSDT AND statusCategory != Done ORDER BY priority ASC, updated DESC',
-        25
-      ),
+    const [yscRes, ysdtRes] = await Promise.all([
+      searchJiraJql(`project = ${SPACE_YSC} AND labels = "auto-bug" ORDER BY created DESC`, FIELDS, 50),
+      searchJiraJql(`project = ${SPACE_YSDT} ORDER BY created DESC`, FIELDS, 50),
     ])
 
     return NextResponse.json({
-      ysdp: normalize(ysdpRes.issues),
-      ysdpTotal: ysdpRes.total,
-      ysc: normalize(yscRes.issues),
-      yscTotal: yscRes.total,
-      ysdt: normalize(ysdtRes.issues),
-      ysdtTotal: ysdtRes.total,
+      ysc: normalize(yscRes),
+      yscIsLast: yscRes.isLast ?? true,
+      ysdt: normalize(ysdtRes),
+      ysdtIsLast: ysdtRes.isLast ?? true,
       lastFetched: new Date().toISOString(),
     })
   } catch (err) {

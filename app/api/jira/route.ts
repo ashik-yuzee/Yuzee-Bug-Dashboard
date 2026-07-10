@@ -4,7 +4,7 @@ import { checkAuth } from '@/lib/apiAuth'
 const JIRA_BASE   = process.env.JIRA_BASE_URL || 'https://yuzeeau.atlassian.net'
 const JIRA_EMAIL  = process.env.JIRA_EMAIL    || ''
 const JIRA_KEY    = process.env.JIRA_API_KEY  || ''
-const SPACE_YSC   = 'YSC'
+const SPACE_YSC   = process.env.JIRA_SPACE_YSC || 'YSC'
 
 function basicAuth(): string {
   return 'Basic ' + Buffer.from(`${JIRA_EMAIL}:${JIRA_KEY}`).toString('base64')

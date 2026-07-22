@@ -18,7 +18,7 @@ import {
   Database, Package, BarChart2,
   Link, XCircle, Ticket as TicketIcon,
 } from 'lucide-react'
-import { ROUTING_COLORS, jiraUrl, getField } from '@/lib/utils'
+import { ROUTING_COLORS, jiraUrl } from '@/lib/utils'
 
 /* ─── design tokens (mirrors globals.css) ───────────────────────── */
 const SEV: Record<string, string> = {
@@ -442,12 +442,12 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
     const rb = sl.filter(b => b.rollbar_id || b.rollbarItemId).length
     const cw = sl.filter(b => b.correlation_id).length
     const ai = sl.filter(b => b.ai_summary).length
-    const ph = sl.filter(b => getField(b, 'posthog_session_url')).length
+    const ur = sl.filter(b => b.source === 'user_report' || b.source === 'yuzee_app').length
     return {
-      rollbar:    { pct: Math.round(rb/n*100), n: rb },
-      cloudwatch: { pct: Math.round(cw/n*100), n: cw },
-      n8n:        { pct: Math.round(ai/n*100), n: ai },
-      posthog:    { pct: Math.round(ph/n*100), n: ph, soon: ph === 0 },
+      rollbar:     { pct: Math.round(rb/n*100), n: rb },
+      cloudwatch:  { pct: Math.round(cw/n*100), n: cw },
+      aiTriage:    { pct: Math.round(ai/n*100), n: ai },
+      userReports: { pct: Math.round(ur/n*100), n: ur },
     }
   }, [bugs])
 
@@ -678,12 +678,18 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
 
         {/* 4 ── INTEGRATIONS ────────────────────────────────────── */}
         <section>
-          <Divider label="Data Pipeline &amp; Integrations" />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12, marginTop: 12 }}>
-            <IntegCard name="Rollbar"     icon={<Radio     size={15}/>} color="#3b82f6" pct={integ.rollbar.pct}    detail={`${integ.rollbar.n} of last 100 bugs have rollbar_id — enables stack traces & occurrence counts`} />
-            <IntegCard name="n8n / Gemini" icon={<Cpu      size={15}/>} color="#a371f7" pct={integ.n8n.pct}        detail={`${integ.n8n.n} of last 100 bugs have ai_summary — Gemini triage pipeline ${integ.n8n.pct > 50 ? 'active' : 'needs attention'}`} />
-            <IntegCard name="CloudWatch"  icon={<Activity  size={15}/>} color="#2dd4bf" pct={integ.cloudwatch.pct} detail={`${integ.cloudwatch.n} of last 100 bugs have correlation_id — enables ±15 min log window links`} />
-            <IntegCard name="PostHog"     icon={<Cloud     size={15}/>} color="#f97316" pct={integ.posthog.pct}    detail={`${integ.posthog.n} session replay URLs in posthog_session_url`} comingSoon={integ.posthog.soon} />
+          <Divider label="Bug Sources &amp; Integration Health" />
+          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 8, marginBottom: 10 }}>
+            Bugs enter via <strong style={{ color: 'var(--tx-2)' }}>Rollbar</strong> (auto-detected errors),{' '}
+            <strong style={{ color: 'var(--tx-2)' }}>CloudWatch</strong> (log scanning), or{' '}
+            <strong style={{ color: 'var(--tx-2)' }}>user submission</strong>.{' '}
+            All are then processed by n8n and triaged by Gemini — 100% of bugs go through that pipeline.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12 }}>
+            <IntegCard name="Rollbar"        icon={<Radio      size={15}/>} color="#3b82f6" pct={integ.rollbar.pct}     detail={`${integ.rollbar.n} of last 100 bugs — auto-detected backend/mobile errors with stack traces & occurrence counts`} />
+            <IntegCard name="CloudWatch"     icon={<Activity   size={15}/>} color="#2dd4bf" pct={integ.cloudwatch.pct}  detail={`${integ.cloudwatch.n} of last 100 bugs have correlation_id — enables ±15 min CloudWatch log window links`} />
+            <IntegCard name="User-Reported"  icon={<Cloud      size={15}/>} color="#f97316" pct={integ.userReports.pct} detail={`${integ.userReports.n} of last 100 bugs were manually submitted via the app — source: user_report / yuzee_app`} />
+            <IntegCard name="AI Triage"      icon={<Cpu        size={15}/>} color="#a371f7" pct={integ.aiTriage.pct}    detail={`${integ.aiTriage.n} of last 100 bugs have Gemini-generated ai_summary — pipeline ${integ.aiTriage.pct > 50 ? 'healthy' : 'needs attention'}`} />
           </div>
         </section>
 

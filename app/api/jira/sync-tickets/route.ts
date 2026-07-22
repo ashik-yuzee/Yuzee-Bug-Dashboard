@@ -3,7 +3,8 @@ import { checkAuth } from '@/lib/apiAuth'
 import { searchJiraJqlAll, jiraConfigured, jiraBrowseUrl } from '@/lib/jiraClient'
 import { createClient } from '@/lib/supabase/server'
 
-const SPACE_YSC = process.env.JIRA_SPACE_YSC || 'YSC'
+const SPACE_YSC  = process.env.JIRA_SPACE_YSC  || 'YSC'
+const SPACE_YSDT = process.env.JIRA_SPACE_YSDT || 'YSDT'
 const FIELDS = ['summary', 'description', 'status', 'priority', 'assignee', 'labels', 'issuetype', 'created', 'updated']
 
 interface RawFields {
@@ -53,16 +54,12 @@ export async function POST() {
     return NextResponse.json({ error: 'Jira not configured — JIRA_API_KEY missing' }, { status: 503 })
   }
 
-  try {
-    const issues = await searchJiraJqlAll(`project = ${SPACE_YSC} ORDER BY updated DESC`, FIELDS)
-
-    const rows = issues.map(issue => {
+  function mapIssues(issues: Awaited<ReturnType<typeof searchJiraJqlAll>>) {
+    return issues.map(issue => {
       const f = issue.fields as RawFields
       const priorityName = (f.priority?.name || '').toLowerCase()
       return {
-        ticket_key: issue.key, // real Jira key (e.g. YSC-410) — must be set explicitly, or the
-                                // BEFORE INSERT trigger would assign a TIX-# on first sync since
-                                // it only fills ticket_key in when the incoming value is null.
+        ticket_key: issue.key,
         jira_key: issue.key,
         jira_url: jiraBrowseUrl(issue.key),
         title: (f.summary || issue.key).slice(0, 500),
@@ -79,6 +76,17 @@ export async function POST() {
         reporter: 'jira-sync',
       }
     })
+  }
+
+  try {
+    // Fetch both spaces in parallel — YSDT ticket keys are YSDT-xxx so there's no
+    // conflict with YSC-xxx keys in the unique ticket_key column.
+    const [yscIssues, ysdtIssues] = await Promise.all([
+      searchJiraJqlAll(`project = ${SPACE_YSC} ORDER BY updated DESC`, FIELDS),
+      searchJiraJqlAll(`project = ${SPACE_YSDT} ORDER BY updated DESC`, FIELDS),
+    ])
+
+    const rows = [...mapIssues(yscIssues), ...mapIssues(ysdtIssues)]
 
     if (rows.length === 0) {
       return NextResponse.json({ synced: 0, note: 'No issues returned from Jira — check project access / permissions.' })
@@ -93,7 +101,7 @@ export async function POST() {
     const { error } = await supabase.from('internal_tickets').upsert(rows, { onConflict: 'ticket_key' })
     if (error) throw error
 
-    return NextResponse.json({ synced: rows.length })
+    return NextResponse.json({ synced: rows.length, ysc: yscIssues.length, ysdt: ysdtIssues.length })
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to sync Jira tickets'
     return NextResponse.json({ error: msg }, { status: 500 })

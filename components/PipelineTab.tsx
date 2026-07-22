@@ -120,12 +120,14 @@ export default function PipelineTab() {
   const [requeueingId, setRequeuingId] = useState<string | null>(null)
   const [requeueingAll, setRequeuingAll] = useState(false)
 
-  // Data quality state
+  // Data quality state — lazy: only fetched when the "quality" sub-tab is actually open.
+  // This avoids firing 6 parallel HEAD queries on every Pipeline page mount.
   const [dq, setDq] = useState<Record<string, number | null>>({})
-  const [dqLoading, setDqLoading] = useState(true)
+  const [dqLoading, setDqLoading] = useState(false)
   const [dqRefreshToken, setDqRefreshToken] = useState(0)
 
   useEffect(() => {
+    if (subTab !== 'quality') return
     let cancelled = false
     async function load() {
       setDqLoading(true)
@@ -137,7 +139,7 @@ export default function PipelineTab() {
     }
     load()
     return () => { cancelled = true }
-  }, [dqRefreshToken])
+  }, [subTab, dqRefreshToken])
 
   const refreshDataQuality = useCallback(() => setDqRefreshToken(t => t + 1), [])
 

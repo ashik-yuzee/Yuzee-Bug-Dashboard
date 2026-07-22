@@ -77,7 +77,7 @@ function BugRulesView() {
         <TableShell headers={headers} empty={rules.length === 0} colCount={headers.length}>
           {rules.map(r => (
             <tr key={r.id} style={{ borderBottom: '1px solid var(--border)', opacity: r.enabled === false ? 0.45 : 1 }}>
-              <td style={{ padding: '9px 12px', fontSize: 12, color: 'var(--tx-1)', maxWidth: 220 }}>{r.name}</td>
+              <td style={{ padding: '9px 12px', fontSize: 12, color: 'var(--tx-1)', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.name}>{r.name}</td>
               <td style={{ padding: '9px 12px', fontSize: 11, color: 'var(--tx-2)' }}>{r.match_field}</td>
               <td style={{ padding: '9px 12px', fontSize: 11, fontFamily: 'monospace', color: 'var(--tx-2)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.match_pattern}>{r.match_pattern}</td>
               <td style={{ padding: '9px 12px', fontSize: 11, color: 'var(--tx-2)' }}>{r.force_tier || '—'}</td>

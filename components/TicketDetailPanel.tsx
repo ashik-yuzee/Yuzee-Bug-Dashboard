@@ -196,7 +196,7 @@ export default function TicketDetailPanel({ ticket, onClose, onUpdated, onOpenBu
               onBlur={saveTitleDescription}
               readOnly={isJira}
               placeholder="No description"
-              style={{ width: '100%', minHeight: 80, background: 'var(--surface-2)', color: 'var(--tx-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: '8px 11px', fontSize: 12.5, fontFamily: 'inherit', resize: 'vertical', opacity: isJira ? 0.75 : 1, cursor: isJira ? 'default' : 'text' }}
+              style={{ width: '100%', minHeight: 200, background: 'var(--surface-2)', color: 'var(--tx-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: '8px 11px', fontSize: 12.5, fontFamily: 'inherit', resize: 'vertical', opacity: isJira ? 0.75 : 1, cursor: isJira ? 'default' : 'text' }}
             />
           </Section>
 

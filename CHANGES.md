@@ -89,3 +89,54 @@ Every change in this session was checked against real data, not just compiled:
 ## 5. Follow-up — Jira sync showing 0 tickets
 
 Reported after §4 shipped. Traced to the real cause rather than re-guessing at permissions: `.env.local`'s `JIRA_EMAIL` was `ashik@yuzee.com`, but the account that actually owns the configured API token is `design@freshfutures.com`. Corrected the email, verified real data flows through immediately, then found and fixed the `ticket_key`/`jira_key` dual-unique-constraint bug described in §4 that surfaced only once real data was flowing. All 244 real YSC tickets are now synced and confirmed idempotent on re-sync.
+
+---
+
+## 6. Polish pass — UX fixes, pipeline accuracy, YSDT sync, Jira pagination
+
+Seven targeted changes requested after §5. All implemented in one pass; `npx tsc --noEmit` and `npx eslint .` clean (0 errors, 3 pre-existing warnings unchanged), `npm run build` succeeds.
+
+### Ticket description field too small
+`TicketDetailPanel.tsx` — increased the description textarea `minHeight` from `80` to `200`. The field is also `resize: vertical` so the user can drag it taller if needed.
+
+### Bug Rules name overflow
+`TriageRulesTab.tsx` — the Name column already had `maxWidth: 220` but was missing truncation CSS. Added `overflow: hidden`, `textOverflow: ellipsis`, `whiteSpace: nowrap`, and a `title` tooltip on the `<td>` so hovering reveals the full rule name.
+
+### Pipeline tab slow to load
+`PipelineTab.tsx` — the "Data Quality" panel fires 6 parallel `COUNT(*)` HEAD queries against Supabase. Previously these ran on every Pipeline page mount regardless of which sub-tab was active. Changed the `useEffect` to include `subTab` in its dependency array and return early when `subTab !== 'quality'`, so the 6 queries only fire when the user actually opens the Data Quality pane. Also initialised `dqLoading` to `false` instead of `true` so the Queue Health sub-tab renders immediately without spurious spinners.
+
+### Overview "Data Pipeline & Integrations" — accuracy fix
+`Overview.tsx` — the section incorrectly listed "n8n / Gemini" as a data *source* alongside Rollbar and CloudWatch, even though n8n/Gemini is the *processing* layer that every bug passes through. Fixed:
+
+- Section renamed to **"Bug Sources & Integration Health"**.
+- Added an explanatory subtitle: *"Bugs enter via Rollbar, CloudWatch, or user submission. All are then processed by n8n and triaged by Gemini — 100% of bugs go through that pipeline."*
+- Replaced the "n8n / Gemini" card with a **"User-Reported"** card showing what percentage of recent bugs came from `source = 'user_report'` or `'yuzee_app'` (manually submitted).
+- Renamed the old "PostHog" card to **"AI Triage (Gemini)"** — shows what % of recent bugs have a Gemini `ai_summary`, a genuine pipeline-health indicator.
+- Removed the now-unused `getField` import that was previously used for the PostHog session URL check.
+
+The four cards now tell a coherent story: Rollbar (auto-detected errors), CloudWatch (log scanning), User-Reported (manual submissions), AI Triage (Gemini coverage).
+
+### Jira Spaces panel — pagination + YSDT default
+`JiraSpacesPanel.tsx`:
+
+- Added client-side pagination capped at **20 tickets per page**. A Prev / Next row sits below the table showing the current range ("1–20 of 244") and total count. If the API returned more tickets than were fetched (i.e. `isLast = false`), an "Open in Jira →" link appears alongside the page controls.
+- Per-space page state is tracked separately so switching from YSDT to YSC and back doesn't reset either space's position.
+- **Changed the default active tab from `YSC` to `YSDT`** — matching the user's request that the overview should "mainly show the YSDT space tickets".
+
+### YSDT sync
+`app/api/jira/sync-tickets/route.ts` — previously only synced the YSC project. Extended to also sync **YSDT** in the same POST request:
+
+- Both spaces are fetched in parallel with `Promise.all([searchJiraJqlAll(YSC), searchJiraJqlAll(YSDT)])`.
+- Row mapping is extracted into a local `mapIssues()` helper and called on both result sets before a single combined upsert.
+- YSDT ticket keys are `YSDT-xxx` and YSC keys are `YSC-xxx` — they are distinct so there is no conflict on the `ticket_key` unique constraint.
+- The response body now includes `{ synced, ysc, ysdt }` counts.
+- The sync toast in `TicketsTab` was updated to display `"YSC: N · YSDT: M tickets up to date"`.
+
+### Tickets tab — YSC / YSDT / Internal space switcher
+`TicketsTab.tsx` — replaced the coarse "hide Jira" toggle with a proper **space switcher** pill bar:
+
+- Four options: **All** · **YSDT** · **YSC** · **Internal**, each showing a live count badge.
+- Space is derived from the `ticket_key` prefix at the point of filtering — no schema change needed: `YSC-*` → YSC, `YSDT-*` → YSDT, `TIX-*` → Internal.
+- Selected space is persisted in `localStorage` under `yuzee-tickets-space` so the preference survives page reloads.
+- `Eye`/`EyeOff` lucide imports removed (no longer needed); empty-state message updated to reference "this space" rather than the old Jira filter copy.
+- `PageInfo` text updated to mention both YSC and YSDT sync.

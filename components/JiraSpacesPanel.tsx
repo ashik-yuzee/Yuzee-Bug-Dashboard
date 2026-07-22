@@ -37,14 +37,23 @@ function linkedReportCount(bugs: ParsedBug[], jiraKey: string): number {
   return bugs.filter(b => b.jira_key === jiraKey).length
 }
 
+const PAGE_SIZE = 20
+
 /* ── Table ─────────────────────────────────────────────────────── */
-function SpaceTable({ tickets, isLast, space, bugs }: {
+function SpaceTable({ tickets, allTickets, isLast, space, bugs, page, onPageChange }: {
   tickets: JiraTicket[]
+  allTickets: JiraTicket[]
   isLast: boolean
   space: SpaceId
   bugs: ParsedBug[]
+  page: number
+  onPageChange: (p: number) => void
 }) {
-  if (tickets.length === 0) {
+  const totalPages = Math.max(1, Math.ceil(allTickets.length / PAGE_SIZE))
+  const rangeStart = page * PAGE_SIZE + 1
+  const rangeEnd   = Math.min((page + 1) * PAGE_SIZE, allTickets.length)
+
+  if (allTickets.length === 0) {
     return (
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
@@ -60,86 +69,109 @@ function SpaceTable({ tickets, isLast, space, bugs }: {
   }
 
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-        <thead>
-          <tr style={{ borderBottom: '1px solid var(--border)' }}>
-            {['Key', 'Summary', 'Status', 'Assignee', 'Priority', 'Created', 'Labels'].map(h => (
-              <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em', whiteSpace: 'nowrap' }}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {tickets.map(ticket => {
-            const pColor = priorityColor(ticket.priority)
-            const badgeStyle = statusBadgeStyle(ticket.statusCategory)
-            const linked = linkedReportCount(bugs, ticket.key)
-            return (
-              <tr key={ticket.key} style={{ borderBottom: '1px solid var(--border)' }}>
-                <td style={{ padding: '7px 10px' }}>
-                  <a href={ticket.url} target="_blank" rel="noopener noreferrer"
-                    style={{ fontSize: 11, fontWeight: 700, color: '#58a6ff', textDecoration: 'none', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
-                    {ticket.key}
-                  </a>
-                  {linked > 0 && (
-                    <span title={`${linked} bug report${linked !== 1 ? 's' : ''} linked to this ticket`} style={{
-                      marginLeft: 6, fontSize: 9, fontWeight: 700, color: '#a78bfa',
-                      background: 'rgba(139,92,246,.10)', border: '1px solid rgba(139,92,246,.25)',
-                      padding: '1px 5px', borderRadius: 3,
-                    }}>
-                      {linked}×
+    <div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{ borderBottom: '1px solid var(--border)' }}>
+              {['Key', 'Summary', 'Status', 'Assignee', 'Priority', 'Created', 'Labels'].map(h => (
+                <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em', whiteSpace: 'nowrap' }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {tickets.map(ticket => {
+              const pColor = priorityColor(ticket.priority)
+              const badgeStyle = statusBadgeStyle(ticket.statusCategory)
+              const linked = linkedReportCount(bugs, ticket.key)
+              return (
+                <tr key={ticket.key} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '7px 10px' }}>
+                    <a href={ticket.url} target="_blank" rel="noopener noreferrer"
+                      style={{ fontSize: 11, fontWeight: 700, color: '#58a6ff', textDecoration: 'none', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+                      {ticket.key}
+                    </a>
+                    {linked > 0 && (
+                      <span title={`${linked} bug report${linked !== 1 ? 's' : ''} linked to this ticket`} style={{
+                        marginLeft: 6, fontSize: 9, fontWeight: 700, color: '#a78bfa',
+                        background: 'rgba(139,92,246,.10)', border: '1px solid rgba(139,92,246,.25)',
+                        padding: '1px 5px', borderRadius: 3,
+                      }}>
+                        {linked}×
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ padding: '7px 10px', maxWidth: 320 }}>
+                    <span style={{ fontSize: 12, color: 'var(--tx-1)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={ticket.summary}>
+                      {ticket.summary}
                     </span>
-                  )}
-                </td>
-                <td style={{ padding: '7px 10px', maxWidth: 320 }}>
-                  <span style={{ fontSize: 12, color: 'var(--tx-1)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={ticket.summary}>
-                    {ticket.summary}
-                  </span>
-                </td>
-                <td style={{ padding: '7px 10px' }}>
-                  <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 4, whiteSpace: 'nowrap', ...badgeStyle }}>{ticket.status}</span>
-                </td>
-                <td style={{ padding: '7px 10px' }}>
-                  {ticket.assignee ? (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--tx-2)', whiteSpace: 'nowrap' }}>
-                      {ticket.assignee.avatar
-                        ? <Image src={ticket.assignee.avatar} alt="" width={14} height={14} unoptimized style={{ borderRadius: '50%' }} />
-                        : <User size={11} />}
-                      {ticket.assignee.name}
+                  </td>
+                  <td style={{ padding: '7px 10px' }}>
+                    <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 4, whiteSpace: 'nowrap', ...badgeStyle }}>{ticket.status}</span>
+                  </td>
+                  <td style={{ padding: '7px 10px' }}>
+                    {ticket.assignee ? (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--tx-2)', whiteSpace: 'nowrap' }}>
+                        {ticket.assignee.avatar
+                          ? <Image src={ticket.assignee.avatar} alt="" width={14} height={14} unoptimized style={{ borderRadius: '50%' }} />
+                          : <User size={11} />}
+                        {ticket.assignee.name}
+                      </span>
+                    ) : <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>Unassigned</span>}
+                  </td>
+                  <td style={{ padding: '7px 10px' }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 3, background: pColor + '18', color: pColor, border: `1px solid ${pColor}30` }}>
+                      {ticket.priority}
                     </span>
-                  ) : <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>Unassigned</span>}
-                </td>
-                <td style={{ padding: '7px 10px' }}>
-                  <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 3, background: pColor + '18', color: pColor, border: `1px solid ${pColor}30` }}>
-                    {ticket.priority}
-                  </span>
-                </td>
-                <td style={{ padding: '7px 10px' }}>
-                  <span style={{ fontSize: 11, color: 'var(--tx-3)', whiteSpace: 'nowrap' }} title={new Date(ticket.created).toLocaleString('en-AU')}>
-                    {relativeTime(ticket.created)}
-                  </span>
-                </td>
-                <td style={{ padding: '7px 10px' }}>
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 180 }}>
-                    {ticket.labels.slice(0, 3).map(l => (
-                      <span key={l} style={{ fontSize: 9, color: 'var(--tx-3)', background: 'var(--surface-2)', border: '1px solid var(--border)', padding: '1px 5px', borderRadius: 3, whiteSpace: 'nowrap' }}>{l}</span>
-                    ))}
-                  </div>
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-      {!isLast && (
-        <a
-          href={`https://yuzeeau.atlassian.net/jira/software/projects/${space}/boards`}
-          target="_blank" rel="noopener noreferrer"
-          style={{ display: 'block', textAlign: 'center', fontSize: 11, color: '#58a6ff', padding: '8px 0', borderTop: '1px solid var(--border)', marginTop: 2, textDecoration: 'none' }}
-        >
-          more in Jira →
-        </a>
-      )}
+                  </td>
+                  <td style={{ padding: '7px 10px' }}>
+                    <span style={{ fontSize: 11, color: 'var(--tx-3)', whiteSpace: 'nowrap' }} title={new Date(ticket.created).toLocaleString('en-AU')}>
+                      {relativeTime(ticket.created)}
+                    </span>
+                  </td>
+                  <td style={{ padding: '7px 10px' }}>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 180 }}>
+                      {ticket.labels.slice(0, 3).map(l => (
+                        <span key={l} style={{ fontSize: 9, color: 'var(--tx-3)', background: 'var(--surface-2)', border: '1px solid var(--border)', padding: '1px 5px', borderRadius: 3, whiteSpace: 'nowrap' }}>{l}</span>
+                      ))}
+                    </div>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination row */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 2px', borderTop: '1px solid var(--border)', marginTop: 2 }}>
+        <span style={{ fontSize: 11, color: 'var(--tx-3)', fontVariantNumeric: 'tabular-nums' }}>
+          {rangeStart}–{rangeEnd} of {allTickets.length}
+          {!isLast && ' (more in Jira)'}
+        </span>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <button
+            onClick={() => onPageChange(page - 1)}
+            disabled={page === 0}
+            style={{ fontSize: 11, padding: '3px 9px', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', color: page === 0 ? 'var(--tx-3)' : 'var(--tx-2)', cursor: page === 0 ? 'default' : 'pointer', opacity: page === 0 ? 0.5 : 1 }}
+          >← Prev</button>
+          <span style={{ fontSize: 11, color: 'var(--tx-3)', padding: '0 4px' }}>{page + 1} / {totalPages}</span>
+          <button
+            onClick={() => onPageChange(page + 1)}
+            disabled={page >= totalPages - 1}
+            style={{ fontSize: 11, padding: '3px 9px', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', color: page >= totalPages - 1 ? 'var(--tx-3)' : 'var(--tx-2)', cursor: page >= totalPages - 1 ? 'default' : 'pointer', opacity: page >= totalPages - 1 ? 0.5 : 1 }}
+          >Next →</button>
+          {!isLast && (
+            <a
+              href={`https://yuzeeau.atlassian.net/jira/software/projects/${space}/boards`}
+              target="_blank" rel="noopener noreferrer"
+              style={{ fontSize: 11, color: '#58a6ff', marginLeft: 4, textDecoration: 'none' }}
+            >
+              Open in Jira →
+            </a>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -147,7 +179,16 @@ function SpaceTable({ tickets, isLast, space, bugs }: {
 /* ── JiraSpacesPanel — YSC / YSDT tab switcher ───────────────────── */
 export default function JiraSpacesPanel({ bugs }: Props) {
   const { data, loading, error, refresh } = useJiraSpaces()
-  const [activeSpace, setActiveSpace] = useState<SpaceId>('YSC')
+  const [activeSpace, setActiveSpace] = useState<SpaceId>('YSDT')
+  const [pages, setPages] = useState<Record<SpaceId, number>>({ YSC: 0, YSDT: 0 })
+
+  function handleSpaceChange(space: SpaceId) {
+    setActiveSpace(space)
+  }
+
+  function handlePageChange(p: number) {
+    setPages(prev => ({ ...prev, [activeSpace]: p }))
+  }
 
   const TABS: { id: SpaceId; label: string; count: number; accent: string }[] = [
     { id: 'YSC',  label: 'YSC · Auto-created (P0–P3)',      count: data.ysc.length,  accent: '#f97316' },
@@ -191,7 +232,7 @@ export default function JiraSpacesPanel({ bugs }: Props) {
         {TABS.map(tab => {
           const active = activeSpace === tab.id
           return (
-            <button key={tab.id} onClick={() => setActiveSpace(tab.id)} style={{
+            <button key={tab.id} onClick={() => handleSpaceChange(tab.id)} style={{
               display: 'flex', alignItems: 'center', gap: 7,
               padding: '7px 14px', marginBottom: -1,
               background: 'transparent',
@@ -232,9 +273,25 @@ export default function JiraSpacesPanel({ bugs }: Props) {
           </div>
         </div>
       ) : activeSpace === 'YSC' ? (
-        <SpaceTable tickets={data.ysc} isLast={data.yscIsLast} space="YSC" bugs={bugs} />
+        <SpaceTable
+          tickets={data.ysc.slice(pages.YSC * PAGE_SIZE, (pages.YSC + 1) * PAGE_SIZE)}
+          allTickets={data.ysc}
+          isLast={data.yscIsLast}
+          space="YSC"
+          bugs={bugs}
+          page={pages.YSC}
+          onPageChange={handlePageChange}
+        />
       ) : (
-        <SpaceTable tickets={data.ysdt} isLast={data.ysdtIsLast} space="YSDT" bugs={bugs} />
+        <SpaceTable
+          tickets={data.ysdt.slice(pages.YSDT * PAGE_SIZE, (pages.YSDT + 1) * PAGE_SIZE)}
+          allTickets={data.ysdt}
+          isLast={data.ysdtIsLast}
+          space="YSDT"
+          bugs={bugs}
+          page={pages.YSDT}
+          onPageChange={handlePageChange}
+        />
       )}
 
       {/* Footnote */}

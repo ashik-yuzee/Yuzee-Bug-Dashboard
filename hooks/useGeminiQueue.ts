@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { withRetry } from '@/lib/withRetry'
 import type { GeminiQueueItem } from '@/components/DashboardClient'
 
 export interface GeminiQueueStats {
@@ -27,7 +28,7 @@ async function fetchQueueStats(): Promise<{ stats: GeminiQueueStats; error: stri
   const thirtyMinsAgo = new Date(Date.now() - 30 * 60_000).toISOString()
 
   try {
-    const [recentRes, stuckRes] = await Promise.all([
+    const [recentRes, stuckRes] = await withRetry(() => Promise.all([
       supabase
         .from('gemini_queue')
         .select('*')
@@ -38,9 +39,11 @@ async function fetchQueueStats(): Promise<{ stats: GeminiQueueStats; error: stri
         .select('*')
         .eq('status', 'queued')
         .lt('created_at', thirtyMinsAgo),
-    ])
-
-    if (recentRes.error) throw recentRes.error
+    ]).then(([recent, stuck]) => {
+      if (recent.error) throw recent.error
+      if (stuck.error) throw stuck.error
+      return [recent, stuck] as const
+    }), { maxRetries: 2, baseDelayMs: 700 })
 
     const items = (recentRes.data || []) as GeminiQueueItem[]
     const stuckItems = (stuckRes.data || []) as GeminiQueueItem[]

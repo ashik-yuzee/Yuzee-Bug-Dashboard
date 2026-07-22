@@ -3,7 +3,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useGeminiQueue } from '@/hooks/useGeminiQueue'
-import type { GeminiQueueItem } from './DashboardClient'
+import type { GeminiQueueItem, PipelineSubTab } from './DashboardClient'
+import CloudWatchMonitorTab from './CloudWatchMonitorTab'
+import PageInfo from './ui/PageInfo'
 import toast from '@/lib/toast'
 import { AlertTriangle, RefreshCw, CheckCircle2, Clock, XCircle, Loader2 } from 'lucide-react'
 
@@ -106,7 +108,14 @@ function QualityTable({ rows }: { rows: QualityRow[] }) {
 }
 
 /* ─── Main ─────────────────────────────────────────────────── */
+const SUB_TABS: { id: PipelineSubTab; label: string }[] = [
+  { id: 'queue', label: 'Queue Health' },
+  { id: 'quality', label: 'Data Quality' },
+  { id: 'cloudwatch', label: 'CloudWatch' },
+]
+
 export default function PipelineTab() {
+  const [subTab, setSubTab] = useState<PipelineSubTab>('queue')
   const { stats, loading: queueLoading, error: queueError, refresh } = useGeminiQueue()
   const [requeueingId, setRequeuingId] = useState<string | null>(null)
   const [requeueingAll, setRequeuingAll] = useState(false)
@@ -175,6 +184,29 @@ export default function PipelineTab() {
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
 
+      <PageInfo storageKey="pipeline">
+        Health of the automation itself, not the bugs it produces. <strong>Queue Health</strong> tracks Gemini AI
+        triage throughput, <strong>Data Quality</strong> flags gaps in the pipeline (missing severities, incomplete
+        triage), and <strong>CloudWatch</strong> shows when each log group was last scanned.
+      </PageInfo>
+
+      {/* ─── Sub-nav ─── */}
+      <div style={{ display: 'flex', gap: 4, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: 3, width: 'fit-content' }}>
+        {SUB_TABS.map(t => (
+          <button key={t.id} onClick={() => setSubTab(t.id)} style={{
+            fontSize: 12, fontWeight: subTab === t.id ? 600 : 400, padding: '5px 12px', borderRadius: 'var(--r-sm)',
+            background: subTab === t.id ? 'var(--orange-dim)' : 'transparent',
+            color: subTab === t.id ? 'var(--orange)' : 'var(--tx-3)',
+            border: 'none', cursor: 'pointer', transition: 'all .15s',
+          }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {subTab === 'cloudwatch' && <CloudWatchMonitorTab />}
+
+      {subTab === 'queue' && <>
       {/* ─── Stuck warning ─── */}
       {stats.stuckItems.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: 'rgba(227,179,65,.08)', border: '1px solid rgba(227,179,65,.28)', borderRadius: 'var(--r-lg)' }}>
@@ -293,8 +325,10 @@ export default function PipelineTab() {
           )}
         </div>
       </div>
+      </>}
 
-      {/* ─── Data quality panel ─── */}
+      {subTab === 'quality' && (
+      /* ─── Data quality panel ─── */
       <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
         <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
@@ -309,6 +343,7 @@ export default function PipelineTab() {
           <QualityTable rows={qualityRows} />
         </div>
       </div>
+      )}
 
     </div>
   )

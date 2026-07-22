@@ -156,6 +156,22 @@ export function rollbarUrl(record: BugReport): string | null {
   return `https://rollbar.com/yuzee/${project}/items/${record.rollbar_id}/`
 }
 
+/**
+ * Rollbar session replay is only playable when both a replay ID exists AND
+ * replay was enabled for that session (`rollbar_replay_enabled`) — a replay
+ * ID alone doesn't guarantee the recording was actually captured/kept.
+ */
+export function rollbarReplayUrl(record: BugReport): string | null {
+  if (!record.rollbar_replay_id || record.rollbar_replay_enabled !== true) return null
+  const sessionId = record.rollbar_session_id
+  if (!sessionId) return null
+  const project = record.rollbar_project_id === '782547' ? 'NewYuzeeApp' : 'YuzeeWebRollbar'
+  const env = record.environment || 'production'
+  const replayId = record.rollbar_replay_id
+  return `https://app.rollbar.com/a/yuzee/replays/p/${project}/env/${env}/session/${sessionId}/replay/${replayId}`
+    + `?prj=782547&projectSlug=${project}&env=${env}&sessionId=${sessionId}&replayId=${replayId}`
+}
+
 export function jiraUrl(jiraKey: string | null): string | null {
   if (!jiraKey) return null
   return `https://yuzeeau.atlassian.net/browse/${jiraKey}`

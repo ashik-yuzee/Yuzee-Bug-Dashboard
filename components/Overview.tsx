@@ -7,13 +7,16 @@ import {
 import type { DashboardStats, ParsedBug } from '@/lib/bugUtils'
 import { computeStats } from '@/lib/bugUtils'
 import { useGeminiQueue } from '@/hooks/useGeminiQueue'
+import { useInternalTickets } from '@/hooks/useInternalTickets'
+import { TICKET_STATUSES } from '@/lib/tickets'
 import JiraSpacesPanel from './JiraSpacesPanel'
+import PageInfo from './ui/PageInfo'
 import {
   AlertTriangle, TrendingUp, Zap, Info, RefreshCw,
   ArrowUpRight, ArrowDownRight, Minus, CheckCircle2,
   Radio, Cpu, Activity, Cloud, Globe, Server, Smartphone,
   Database, Package, BarChart2,
-  Link, XCircle,
+  Link, XCircle, Ticket as TicketIcon,
 } from 'lucide-react'
 import { ROUTING_COLORS, jiraUrl, getField } from '@/lib/utils'
 
@@ -197,16 +200,24 @@ function ChartTip({ active, payload, label }: {
 }
 
 /* ─── distribution mini-card ────────────────────────────────────── */
-function DistCard({ title, rows }: {
+function DistCard({ title, rows, onRowClick }: {
   title: string
   rows: { label: string; value: number; max: number; color: string; badge?: string }[]
+  onRowClick?: (label: string) => void
 }) {
   return (
     <Card pad={16}>
       <p style={{ fontSize: 11, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 12 }}>{title}</p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {rows.map(r => (
-          <div key={r.label} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div
+            key={r.label}
+            onClick={onRowClick ? () => onRowClick(r.label) : undefined}
+            title={onRowClick ? `View ${r.label} bugs →` : undefined}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: onRowClick ? 'pointer' : 'default', borderRadius: 6, margin: '-2px -4px', padding: '2px 4px', transition: 'background .12s' }}
+            onMouseEnter={onRowClick ? e => (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)' : undefined}
+            onMouseLeave={onRowClick ? e => (e.currentTarget as HTMLElement).style.background = 'transparent' : undefined}
+          >
             <span style={{ width: 56, fontSize: 11, color: r.color, fontWeight: 600, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.label}</span>
             <ProgressBar pct={r.max > 0 ? (r.value / r.max) * 100 : 0} color={r.color} />
             <span style={{ fontSize: 11, color: 'var(--tx-2)', fontVariantNumeric: 'tabular-nums', flexShrink: 0, minWidth: 24, textAlign: 'right' }}>{r.value}</span>
@@ -333,13 +344,56 @@ function PipelineWidget() {
   )
 }
 
+/* ─── internal tickets widget ────────────────────────────────────── */
+function TicketsWidget({ onNavigate }: { onNavigate?: () => void }) {
+  const { tickets, loading, error } = useInternalTickets()
+  const counts = TICKET_STATUSES.map(s => ({ ...s, n: tickets.filter(t => t.status === s.id).length }))
+  const open = tickets.filter(t => t.status !== 'done').length
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14 }}>
+        <div>
+          <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif' }}>Internal Tickets</p>
+          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 2 }}>internal_tickets · all time</p>
+        </div>
+        <button onClick={onNavigate} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600, color: 'var(--orange)', background: 'var(--orange-dim)', border: '1px solid rgba(249,115,22,.25)', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontFamily: 'inherit' }}>
+          <TicketIcon size={11} /> View board →
+        </button>
+      </div>
+      {loading ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
+          {[0,1,2,3].map(i => <div key={i} className="skeleton" style={{ height: 60, borderRadius: 8 }} />)}
+        </div>
+      ) : error ? (
+        <p style={{ fontSize: 12, color: 'var(--danger)' }}>{error}</p>
+      ) : tickets.length === 0 ? (
+        <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No internal tickets yet — create one from the Tickets tab or a bug&apos;s detail panel.</p>
+      ) : (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8, marginBottom: 10 }}>
+            {counts.map(c => (
+              <div key={c.id} style={{ background: 'var(--surface-2)', borderRadius: 8, padding: '10px 12px', textAlign: 'center', borderTop: `2px solid ${c.color}` }}>
+                <p style={{ fontSize: 22, fontWeight: 800, color: c.color, lineHeight: 1, marginBottom: 3, fontVariantNumeric: 'tabular-nums' }}>{c.n}</p>
+                <p style={{ fontSize: 9.5, color: 'var(--tx-3)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.05em' }}>{c.label}</p>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--tx-3)' }}>{open} open ticket{open === 1 ? '' : 's'} across the team</p>
+        </>
+      )}
+    </Card>
+  )
+}
+
 /* ─── main ──────────────────────────────────────────────────────── */
-export default function Overview({ stats: _globalStats, bugs: allBugs, includeLegacy, onNavigateToBugs, onNavigateToClusters }: {
+export default function Overview({ stats: _globalStats, bugs: allBugs, includeLegacy, onNavigateToBugs, onNavigateToClusters, onNavigateToTickets }: {
   stats: DashboardStats
   bugs: ParsedBug[]
   includeLegacy: boolean
   onNavigateToBugs: (f: Record<string, string[] | string>) => void
   onNavigateToClusters?: () => void
+  onNavigateToTickets?: () => void
 }) {
   void _globalStats // superseded by the range-scoped `stats` computed below
 
@@ -411,6 +465,12 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
   return (
     <div style={{ flex: 1, overflowY: 'auto', background: 'var(--bg)' }}>
       <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+        <PageInfo storageKey="overview">
+          A live snapshot of the whole bug pipeline: KPIs, volume trends, severity/status/routing/component
+          breakdowns, AI triage health, and auto-generated insights. Most charts and numbers are clickable — click a
+          bar, slice, or KPI to jump to the matching bugs in Bug Reports.
+        </PageInfo>
 
         {/* 1 ── CRITICAL SUMMARY (top of page, minimal, no walls of numbers) ── */}
         <section>
@@ -554,11 +614,11 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
                     />
                     <YAxis tick={{ fontSize: 11, fill: '#7d8590' }} axisLine={false} tickLine={false} width={28} allowDecimals={false} />
                     <Tooltip content={<ChartTip />} cursor={{ fill: 'rgba(255,255,255,.03)' }} />
-                    <Bar dataKey="P1"   stackId="s" fill={CHART_FILL.P1}   isAnimationActive={false} />
-                    <Bar dataKey="P2"   stackId="s" fill={CHART_FILL.P2}   isAnimationActive={false} />
-                    <Bar dataKey="P3"   stackId="s" fill={CHART_FILL.P3}   isAnimationActive={false} />
-                    <Bar dataKey="P4"   stackId="s" fill={CHART_FILL.P4}   isAnimationActive={false} />
-                    <Bar dataKey="none" stackId="s" fill={CHART_FILL.none} isAnimationActive={false} radius={[3,3,0,0]} />
+                    <Bar dataKey="P1"   stackId="s" fill={CHART_FILL.P1}   isAnimationActive={false} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
+                    <Bar dataKey="P2"   stackId="s" fill={CHART_FILL.P2}   isAnimationActive={false} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
+                    <Bar dataKey="P3"   stackId="s" fill={CHART_FILL.P3}   isAnimationActive={false} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
+                    <Bar dataKey="P4"   stackId="s" fill={CHART_FILL.P4}   isAnimationActive={false} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
+                    <Bar dataKey="none" stackId="s" fill={CHART_FILL.none} isAnimationActive={false} radius={[3,3,0,0]} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
                   </BarChart>
                 </ResponsiveContainer>
                 <div style={{ display: 'flex', gap: 20, marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
@@ -582,7 +642,7 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
           <Divider label="Distribution" />
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12, marginTop: 12 }}>
 
-            <DistCard title="Severity" rows={
+            <DistCard title="Severity" onRowClick={s => onNavigateToBugs({ severity: [s] })} rows={
               (['P1','P2','P3','P4'] as const).map(s => ({
                 label: s, color: SEV[s],
                 value: bugs.filter(b => b.severity === s).length,
@@ -590,14 +650,14 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
               }))
             } />
 
-            <DistCard title="Status" rows={[
+            <DistCard title="Status" onRowClick={s => onNavigateToBugs({ status: [s] })} rows={[
               { label: 'complete', color: '#3fb950', value: bugs.filter(b => b.status === 'complete').length, max: stats.total || 1 },
               { label: 'triaging', color: '#a371f7', value: bugs.filter(b => b.status === 'triaging').length, max: stats.total || 1 },
               { label: 'pending',  color: '#e3b341', value: bugs.filter(b => b.status === 'pending').length,  max: stats.total || 1 },
               { label: 'resolved', color: '#58a6ff', value: bugs.filter(b => b.status === 'resolved').length, max: stats.total || 1 },
             ]} />
 
-            <DistCard title="Routing" rows={
+            <DistCard title="Routing" onRowClick={r => onNavigateToBugs({ platform: [r] })} rows={
               stats.routingBreakdown.slice(0, 4).map(r => ({
                 label: r.routing,
                 color: r.routing === 'BACKEND' ? '#a371f7' : r.routing === 'MOBILE' ? '#2dd4bf' : r.routing === 'WEB' ? '#3fb950' : 'var(--tx-3)',
@@ -606,7 +666,7 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
               }))
             } />
 
-            <DistCard title="Component" rows={
+            <DistCard title="Component" onRowClick={c => onNavigateToBugs({ component: [c] })} rows={
               stats.componentBreakdown.slice(0, 5).map(c => ({
                 label: c.component, color: '#f97316',
                 value: c.count, max: stats.componentBreakdown[0]?.count || 1,
@@ -632,6 +692,14 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
           <Divider label="Jira Spaces" />
           <div style={{ marginTop: 12 }}>
             <JiraSpacesPanel bugs={bugs} />
+          </div>
+        </section>
+
+        {/* 5b ── INTERNAL TICKETS ───────────────────────────────── */}
+        <section>
+          <Divider label="Internal Tickets" />
+          <div style={{ marginTop: 12 }}>
+            <TicketsWidget onNavigate={onNavigateToTickets} />
           </div>
         </section>
 

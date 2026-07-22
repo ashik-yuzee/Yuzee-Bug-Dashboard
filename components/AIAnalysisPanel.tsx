@@ -11,14 +11,6 @@ interface Props { bugs: ParsedBug[]; stats: DashboardStats; onClose: () => void 
 
 const TIMEOUT_MS = 60_000
 
-const LOADING_MESSAGES = [
-  'Reading nested Rollbar context…',
-  'Cross-referencing error patterns…',
-  'Mapping affected endpoints…',
-  'Formulating root cause hypotheses…',
-  'Drafting action plan…',
-]
-
 /* ─── Prompt builder ─────────────────────────────────────── */
 function buildPrompt(bugs: ParsedBug[], stats: DashboardStats): string {
   const details = bugs.map((b, i) => {
@@ -178,15 +170,11 @@ function RichText({ text }: { text: string }) {
 /* ─── Rate limit countdown ───────────────────────────────── */
 function RateCountdown({ waitMs, onReady }: { waitMs: number; onReady: () => void }) {
   const [remaining, setRemaining] = useState(Math.ceil(waitMs / 1000))
-  // Keep the latest onReady in a ref so the interval always calls the current
-  // version without needing to restart the countdown whenever the parent re-renders.
-  const onReadyRef = useRef(onReady)
-  useEffect(() => { onReadyRef.current = onReady }, [onReady])
 
   useEffect(() => {
     const interval = setInterval(() => {
       setRemaining(r => {
-        if (r <= 1) { clearInterval(interval); onReadyRef.current(); return 0 }
+        if (r <= 1) { clearInterval(interval); onReady(); return 0 }
         return r - 1
       })
     }, 1000)
@@ -292,12 +280,12 @@ export default function AIAnalysisPanel({ bugs, stats, onClose }: Props) {
     }
   }, [bugs, stats])
 
-  // Auto-start on mount
+  // Auto-start on mount — deferred a tick so the effect body itself never
+  // synchronously calls a state setter (runAnalysis sets loading state
+  // before its first await).
   useEffect(() => {
-    let cancelled = false
-    async function start() { if (!cancelled) await runAnalysis() }
-    start()
-    return () => { cancelled = true }
+    const id = setTimeout(() => { runAnalysis() }, 0)
+    return () => clearTimeout(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -316,10 +304,17 @@ export default function AIAnalysisPanel({ bugs, stats, onClose }: Props) {
     }).catch(() => toast.error('Copy failed', 'Browser blocked clipboard access.'))
   }
 
+  const loadingMessages = [
+    'Reading nested Rollbar context…',
+    'Cross-referencing error patterns…',
+    'Mapping affected endpoints…',
+    'Formulating root cause hypotheses…',
+    'Drafting action plan…',
+  ]
   const [msgIdx, setMsgIdx] = useState(0)
   useEffect(() => {
     if (!loading) return
-    const t = setInterval(() => setMsgIdx(i => (i + 1) % LOADING_MESSAGES.length), 2400)
+    const t = setInterval(() => setMsgIdx(i => (i + 1) % loadingMessages.length), 2400)
     return () => clearInterval(t)
   }, [loading])
 
@@ -486,7 +481,7 @@ export default function AIAnalysisPanel({ bugs, stats, onClose }: Props) {
                 <p style={{ fontWeight:600, color:'var(--tx-1)', marginBottom:6, fontSize:15 }}>
                   {attempt > 0 ? `Retry attempt ${attempt}…` : `Analysing ${bugs.length} bug${bugs.length > 1 ? 's' : ''}…`}
                 </p>
-                <p style={{ fontSize:12, color:'var(--tx-3)' }} aria-live="polite">{LOADING_MESSAGES[msgIdx]}</p>
+                <p style={{ fontSize:12, color:'var(--tx-3)' }} aria-live="polite">{loadingMessages[msgIdx]}</p>
                 {elapsed > 8 && (
                   <p style={{ fontSize:11, color:'var(--tx-3)', marginTop:6 }}>
                     {elapsed}s elapsed — complex analysis may take up to {TIMEOUT_MS / 1000}s

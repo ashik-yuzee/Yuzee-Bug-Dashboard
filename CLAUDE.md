@@ -718,4 +718,57 @@ supabase.from('bug_reports').select('*', { count: 'exact', head: true }).eq('jir
 - **`BLANK_FILTERS` is exported** from `DashboardClient.tsx` for use in `BugTable.tsx`.
 - **`BugDetailPanel`** receives `ParsedBug` (not raw `BugReport`) — richer type with `routingToken`, `parsedLabels`, etc.
 - **Alert banners are session-dismissed only** — no persistence. Reset on page reload.
+
+---
+
+## Implementation State (as of 2026-07-21)
+
+A newer prompt (`yuzee_dashboard_claude_code_prompt.md`) documented the n8n pipeline in more depth and asked for coverage of tables that had no UI yet. Before implementing, the live Supabase schema (project `spqgjumefasdmgeeokgv`) was checked directly rather than trusting either the old docs above or the new prompt — both were stale in places. Key findings, since they'll save the next person from re-guessing:
+
+- **`bug_reports` already has every column the new prompt describes** (`exception_class`, `assigned_owner`, `ownership_team`, `ticketability_score`, `evidence_score`, `impact_score`, device/browser fields, `rollbar_hash`, `error_fingerprint`, etc.) — the `BugReport` type in `DashboardClient.tsx` has been extended to include all of them.
+- **`gemini_queue.status` is only ever `'processed'` in practice** (verified via `select status, count(*) from gemini_queue group by status`). The new prompt claimed an enum of `queued/processing/done/error`, but that does not match reality — do not "fix" `useGeminiQueue.ts`/`PipelineTab.tsx` to match that enum without checking live data first.
+- **`bug_rules`, `triage_feedback`, `jira_comment_actions`, `cw_scan_state`, `feedback_reports`** all exist live but had RLS enabled with **zero policies** — the anon key could not read them. A migration (`add_read_policies_for_dashboard_tables`) added a `SELECT`-only `"Enable read access for all users"` policy to each, mirroring the exact policy already on `bug_reports`.
+- **The Rollbar session replay link was broken**: `BugDetailPanel.tsx` built its "Session Replay" button from `posthog_session_url`, which is null for all rows. `rollbar_replay_id` + `rollbar_replay_enabled` (populated for ~20 bugs) was unused. Fixed via a new `rollbarReplayUrl()` in `lib/utils.ts` and a dedicated "Watch Replay" quick-link button, alongside a separate "PostHog Session" button (correctly disabled until that field is populated).
+- **`daily_bug_reports` does not exist.** `DailyDigestTab.tsx` handles this gracefully — note that PostgREST returns error code `PGRST205` ("Could not find the table … in the schema cache"), **not** Postgres's `42P01`, when a table is missing from its schema cache. Check both.
+
+### Navigation change
+
+Nav grew from 6 to 9 top-level tabs (horizontally scrollable via `overflowX:auto` on the nav container — `maxWidth:'54vw'`, each button `flexShrink:0`). "All Bugs" was relabeled "Bug Reports" (id unchanged, still `'bugs'`). Two tabs gained an internal pill sub-nav instead of becoming more top-level tabs:
+- **Pipeline** → `Queue Health` (existing) · `Data Quality` (existing) · `CloudWatch` (new, `cw_scan_state`)
+- **Triage & Rules** (new tab) → `Bug Rules` · `Triage Feedback` · `Jira Comments` (`bug_rules` / `triage_feedback` / `jira_comment_actions`)
+
+Plus two more new standalone tabs: **Feedback** (`feedback_reports`) and **Daily Digest** (`daily_bug_reports`, placeholder until that table exists).
+
+### New Files Created
+
+| File | Purpose |
+|---|---|
+| `hooks/useBugRules.ts` | Fetches all `bug_rules`, ordered by priority. |
+| `hooks/useTriageFeedback.ts` | Fetches all `triage_feedback`, ordered by `created_at desc`. |
+| `hooks/useJiraCommentActions.ts` | Fetches all `jira_comment_actions` (full history for the table) + derives a last-7-days intent count summary client-side. |
+| `hooks/useCwScanState.ts` | Fetches all `cw_scan_state` rows. |
+| `hooks/useFeedbackReports.ts` | Fetches all `feedback_reports`, ordered by `created_at desc`. |
+| `components/TriageRulesTab.tsx` | "Triage & Rules" tab — 3-way pill sub-nav rendering Bug Rules / Triage Feedback / Jira Comments tables. |
+| `components/CloudWatchMonitorTab.tsx` | `cw_scan_state` table (stale >15min and error-count >10 highlighting); rendered as the 3rd pill inside `PipelineTab.tsx`. |
+| `components/FeedbackReportsTab.tsx` | `feedback_reports` table with sentiment/category/actionable filters and an accurate empty state (0 rows today). |
+| `components/DailyDigestTab.tsx` | Daily HTML report cards, or a graceful placeholder when `daily_bug_reports` doesn't exist. |
+
+### Modified Files
+
+| File | Key Changes |
+|---|---|
+| `components/DashboardClient.tsx` | `BugReport` type extended with ~30 missing live columns. New types: `BugRule`, `JiraCommentAction`, `CwScanState`, `FeedbackReport`, `DailyBugReport`. `TriageFeedback` gained `weight`/`promoted`. `Tab` union extended (`triage`, `feedback`, `daily`); new `PipelineSubTab`/`TriageSubTab` exports. Nav relabeled + made horizontally scrollable. |
+| `lib/utils.ts` | Added `rollbarReplayUrl()`. |
+| `components/BugDetailPanel.tsx` | Quick-links bar: "Watch Replay" (Rollbar, via `rollbarReplayUrl()`) added alongside "PostHog Session" (renamed from the old, incorrectly-wired "Session Replay" button). |
+| `components/PipelineTab.tsx` | Added pill sub-nav (`Queue Health` / `Data Quality` / `CloudWatch`); existing content unchanged, just grouped. |
+| `components/Reports.tsx` | Unrelated pre-existing lint errors fixed while in the file: removed unused `userBugs`, extracted the P1/P2 response-time IIFE into a top-level `buildP12ResponseTime()` helper (matches the `buildResolutionRate` convention) to satisfy the `react-hooks/purity` rule on `Date.now()`, escaped a stray quote. |
+| `components/AIAnalysisPanel.tsx` | Unrelated pre-existing lint error fixed: deferred the mount-time `runAnalysis()` call via `setTimeout(...,0)` so the effect body never synchronously calls a state setter (satisfies `react-hooks/set-state-in-effect`). |
+
+### Supabase migration applied
+
+`add_read_policies_for_dashboard_tables` — adds `SELECT` policy `"Enable read access for all users"` (`roles: public`, `using (true)`) to `bug_rules`, `triage_feedback`, `jira_comment_actions`, `cw_scan_state`, `feedback_reports`. No write access granted anywhere.
+
+### Verified
+
+`npx tsc --noEmit` clean, `npx eslint .` clean (0 errors), `npm run build` succeeds. Manually logged in and clicked through all 9 tabs + both sub-nav groups against live data (72 gemini_queue rows, 9 bug_rules, 5 triage_feedback, 102 jira_comment_actions, 13 cw_scan_state, 0 feedback_reports) with no console errors. Confirmed the "Watch Replay" button opens a correctly-formatted URL for a bug with real replay data.
 - **`getField()`** is the canonical way to read any column that may be null in older records but present in `full_data`.

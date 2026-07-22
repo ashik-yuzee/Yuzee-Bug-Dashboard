@@ -4,22 +4,24 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import type { ParsedBug } from '@/lib/bugUtils'
 import {
   getField, parseLabels, parseFeatureFlags, buildCloudWatchUrl,
-  rollbarUrl, jiraUrl, formatTimestamp, relativeTime, ROUTING_COLORS,
+  rollbarUrl, rollbarReplayUrl, jiraUrl, formatTimestamp, relativeTime, ROUTING_COLORS,
   getReporterIdentity, getUserAgentString, parseUserAgent, deriveOS,
 } from '@/lib/utils'
 import { useJiraStatuses } from '@/hooks/useJiraStatuses'
 import { createClient } from '@/lib/supabase/client'
-import type { GeminiQueueItem, TriageFeedback } from '@/components/DashboardClient'
+import type { GeminiQueueItem, TriageFeedback, InternalTicket } from '@/components/DashboardClient'
+import TicketCreateModal from './TicketCreateModal'
 import toast from '@/lib/toast'
 import {
   X, ExternalLink, Copy, Check, AlertTriangle, Cloud,
-  Play, Link2, RefreshCw, CheckCircle2, GitMerge, ChevronDown,
+  Play, Link2, RefreshCw, CheckCircle2, GitMerge, ChevronDown, BarChart2, Ticket as TicketIcon,
 } from 'lucide-react'
 
 interface Props {
   bug: ParsedBug
   onClose: () => void
   onBugUpdated?: (reportId: string, changes: Partial<ParsedBug>) => void
+  onOpenTicket?: (ticket: InternalTicket) => void
 }
 
 const SEV_COL: Record<string, string> = { P1:'var(--p1)', P2:'var(--p2)', P3:'var(--p3)', P4:'var(--p4)' }
@@ -114,8 +116,10 @@ function QuickLinkBtn({ href, icon, label, disabled, warning }: {
   )
 }
 
-export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
+export default function BugDetailPanel({ bug, onClose, onBugUpdated, onOpenTicket }: Props) {
   const [acting, setActing] = useState<'requeue' | 'resolve' | 'duplicate' | null>(null)
+  const [linkedTicket, setLinkedTicket] = useState<InternalTicket | null | undefined>(undefined)
+  const [showTicketModal, setShowTicketModal] = useState(false)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -150,7 +154,8 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
   const cwUrl = buildCloudWatchUrl(bug)
   const rbUrl = rollbarUrl(bug)
   const jiraLink = jiraUrl(bug.jira_key)
-  const sessionReplayUrl = getField(bug, 'posthog_session_url') as string | null
+  const replayUrl = rollbarReplayUrl(bug)
+  const posthogSessionUrl = getField(bug, 'posthog_session_url') as string | null
 
   const fullParsed = (() => {
     try { return typeof bug.full_data === 'string' ? JSON.parse(bug.full_data) : bug.full_data }
@@ -170,6 +175,22 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
   const jiraStatus = bug.jira_key ? jiraStatuses[bug.jira_key] : undefined
 
   const supabase = createClient()
+
+  // Internal ticket linked to this bug, if one has been created.
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      try {
+        const { data } = await supabase.from('internal_tickets').select('*').eq('linked_report_id', bug.report_id).maybeSingle()
+        if (!cancelled) setLinkedTicket((data as InternalTicket | null) || null)
+      } catch {
+        if (!cancelled) setLinkedTicket(null)
+      }
+    }
+    load()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bug.report_id])
 
   // AI pipeline status for this report — gemini_queue rows + any human triage_feedback corrections.
   const [queueRows, setQueueRows] = useState<GeminiQueueItem[]>([])
@@ -308,10 +329,16 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
               disabled={!cwUrl}
             />
             <QuickLinkBtn
-              href={sessionReplayUrl}
+              href={replayUrl}
               icon={<Play size={13} aria-hidden />}
-              label="Session Replay"
-              disabled={!sessionReplayUrl}
+              label="Watch Replay"
+              disabled={!replayUrl}
+            />
+            <QuickLinkBtn
+              href={posthogSessionUrl}
+              icon={<BarChart2 size={13} aria-hidden />}
+              label="PostHog Session"
+              disabled={!posthogSessionUrl}
             />
           </div>
 
@@ -614,11 +641,42 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated }: Props) {
                   <GitMerge size={12} /> Marked as duplicate
                 </p>
               )}
+              {linkedTicket === undefined ? null : linkedTicket ? (
+                <button
+                  onClick={() => onOpenTicket?.(linkedTicket)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '8px 13px', borderRadius: 'var(--r-md)', fontSize: 12, fontWeight: 500, background: 'var(--orange-dim)', color: 'var(--orange)', border: '1px solid rgba(249,115,22,.25)', cursor: 'pointer' }}
+                >
+                  <TicketIcon size={12} aria-hidden />
+                  View Ticket {linkedTicket.ticket_key}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowTicketModal(true)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '8px 13px', borderRadius: 'var(--r-md)', fontSize: 12, fontWeight: 500, background: 'var(--surface-2)', color: 'var(--tx-1)', border: '1px solid var(--border)', cursor: 'pointer' }}
+                >
+                  <TicketIcon size={12} aria-hidden />
+                  Create Internal Ticket
+                </button>
+              )}
             </div>
           </Section>
 
         </div>
       </div>
+
+      {showTicketModal && (
+        <TicketCreateModal
+          onClose={() => setShowTicketModal(false)}
+          onCreated={(t) => setLinkedTicket(t)}
+          prefill={{
+            title: bug.jira_key ? `[${bug.jira_key}] ${(bug.description || '').slice(0, 80)}` : (bug.description || '').slice(0, 80),
+            description: bug.ai_summary || bug.description || undefined,
+            priority: bug.severity || undefined,
+            linkedReportId: bug.report_id,
+            linkedLabel: bug.jira_key || bug.report_id,
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -8,6 +8,7 @@ import {
   getReporterIdentity, getUserAgentString, parseUserAgent, deriveOS, isLegacy,
 } from '@/lib/utils'
 import { useJiraStatuses } from '@/hooks/useJiraStatuses'
+import PageInfo from './ui/PageInfo'
 import {
   ChevronUp, ChevronDown, ChevronsUpDown, ExternalLink, AlertTriangle,
   Check, Copy, X, Search, ChevronLeft, ChevronRight, History,
@@ -125,6 +126,13 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
 
   return (
     <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+
+      <div style={{ padding: '12px 14px 0' }}>
+        <PageInfo storageKey="bugs">
+          Every bug report from Rollbar, CloudWatch, and user submissions — fully filterable and sortable. Click any
+          row to see its full AI triage, raw stack trace, telemetry timeline, and debug links.
+        </PageInfo>
+      </div>
 
       {/* ─── Inline filter bar ─── */}
       <div style={{ background: 'var(--surface-1)', borderBottom: '1px solid var(--border)', padding: '10px 14px', flexShrink: 0 }}>

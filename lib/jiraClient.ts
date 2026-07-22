@@ -33,11 +33,11 @@ export interface JiraSearchResult {
  * The replacement, POST /rest/api/3/search/jql, drops the cheap `total` count —
  * pagination is cursor-based (`nextPageToken`/`isLast`) instead of `startAt`/`total`.
  */
-export async function searchJiraJql(jql: string, fields: string[], maxResults = 50): Promise<JiraSearchResult> {
+export async function searchJiraJql(jql: string, fields: string[], maxResults = 50, nextPageToken?: string): Promise<JiraSearchResult> {
   const res = await fetch(`${JIRA_BASE}/rest/api/3/search/jql`, {
     method: 'POST',
     headers: jiraAuthHeaders(),
-    body: JSON.stringify({ jql, fields, maxResults }),
+    body: JSON.stringify({ jql, fields, maxResults, ...(nextPageToken ? { nextPageToken } : {}) }),
   })
 
   if (!res.ok) {
@@ -46,6 +46,19 @@ export async function searchJiraJql(jql: string, fields: string[], maxResults = 
   }
 
   return res.json()
+}
+
+/** Pages through searchJiraJql until isLast, capped at maxPages as a runaway guard. */
+export async function searchJiraJqlAll(jql: string, fields: string[], pageSize = 100, maxPages = 20): Promise<Array<{ key: string; fields: Record<string, unknown> }>> {
+  const all: Array<{ key: string; fields: Record<string, unknown> }> = []
+  let token: string | undefined
+  for (let page = 0; page < maxPages; page++) {
+    const res = await searchJiraJql(jql, fields, pageSize, token)
+    all.push(...res.issues)
+    if (res.isLast || !res.nextPageToken) break
+    token = res.nextPageToken
+  }
+  return all
 }
 
 export { JIRA_BASE }

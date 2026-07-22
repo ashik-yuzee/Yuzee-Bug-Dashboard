@@ -1,9 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { ErrorCluster, ParsedBug } from '@/lib/bugUtils'
 import { ROUTING_COLORS } from '@/lib/utils'
-import { ChevronDown, ChevronRight, ExternalLink, Sparkles, Copy, CheckCheck, GitMerge } from 'lucide-react'
+import PageInfo from './ui/PageInfo'
+import { ChevronDown, ChevronRight, ExternalLink, Sparkles, Copy, CheckCheck, GitMerge, Search, X } from 'lucide-react'
+
+type SortMode = 'count' | 'severity' | 'recent' | 'oldest' | 'component'
+const SEV_RANK: Record<string, number> = { P1: 0, P2: 1, P3: 2, P4: 3, unknown: 4 }
 
 interface Props {
   clusters: ErrorCluster[]
@@ -441,13 +445,46 @@ function ClusterCard({ cluster, rank, onAnalyse, onViewBug, onNavigateToBugs }: 
 
 export default function BugClusters({ clusters, onAnalyse, onViewBug, onNavigateToBugs }: Props) {
   const [clusterFilter, setClusterFilter] = useState<'all' | 'unresolved' | 'no-jira' | 'production'>('all')
+  const [search, setSearch] = useState('')
+  const [severityFilter, setSeverityFilter] = useState<string[]>([])
+  const [routingFilter, setRoutingFilter] = useState<string[]>([])
+  const [componentFilter, setComponentFilter] = useState('all')
+  const [sortBy, setSortBy] = useState<SortMode>('count')
 
-  const filtered = clusters.filter(c => {
-    if (clusterFilter === 'unresolved') return Object.entries(c.statuses).some(([s, n]) => s !== 'complete' && n > 0)
-    if (clusterFilter === 'no-jira') return c.jiraKeys.length === 0
-    if (clusterFilter === 'production') return c.environments.includes('production')
-    return true
-  })
+  const componentOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const c of clusters) if (c.topComponent) set.add(c.topComponent)
+    return [...set].sort()
+  }, [clusters])
+
+  const toggleSeverity = (s: string) => setSeverityFilter(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s])
+  const toggleRouting = (r: string) => setRoutingFilter(prev => prev.includes(r) ? prev.filter(x => x !== r) : [...prev, r])
+
+  const filtered = useMemo(() => {
+    let r = clusters.filter(c => {
+      if (clusterFilter === 'unresolved' && !Object.entries(c.statuses).some(([s, n]) => s !== 'complete' && n > 0)) return false
+      if (clusterFilter === 'no-jira' && c.jiraKeys.length > 0) return false
+      if (clusterFilter === 'production' && !c.environments.includes('production')) return false
+      if (search && !c.description.toLowerCase().includes(search.toLowerCase())) return false
+      if (severityFilter.length && !severityFilter.includes(c.dominantSeverity || 'unknown')) return false
+      if (routingFilter.length && !c.routingTokens.some(t => routingFilter.includes(t))) return false
+      if (componentFilter !== 'all' && c.topComponent !== componentFilter) return false
+      return true
+    })
+    r = [...r].sort((a, b) => {
+      switch (sortBy) {
+        case 'severity':  return (SEV_RANK[a.dominantSeverity || 'unknown'] ?? 5) - (SEV_RANK[b.dominantSeverity || 'unknown'] ?? 5)
+        case 'recent':    return (b.lastSeen || '').localeCompare(a.lastSeen || '')
+        case 'oldest':    return (a.firstSeen || '').localeCompare(b.firstSeen || '')
+        case 'component': return (a.topComponent || '').localeCompare(b.topComponent || '')
+        default:          return b.count - a.count
+      }
+    })
+    return r
+  }, [clusters, clusterFilter, search, severityFilter, routingFilter, componentFilter, sortBy])
+
+  const activeFilterCount = (search ? 1 : 0) + severityFilter.length + routingFilter.length + (componentFilter !== 'all' ? 1 : 0)
+  const clearAllFilters = () => { setSearch(''); setSeverityFilter([]); setRoutingFilter([]); setComponentFilter('all') }
 
   const totalBugs  = clusters.reduce((a, c) => a + c.count, 0)
   const dupeGroups = clusters.filter(c => c.count > 1)
@@ -455,6 +492,79 @@ export default function BugClusters({ clusters, onAnalyse, onViewBug, onNavigate
 
   return (
     <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ padding: '12px 18px 0' }}>
+        <PageInfo storageKey="clusters">
+          Bugs are automatically grouped by a normalized version of their error message, so the same underlying
+          failure shows up once instead of dozens of times. Filter and sort to find what&apos;s breaking most often,
+          then click &quot;View N →&quot; to jump to those exact bugs.
+        </PageInfo>
+      </div>
+
+      {/* Advanced filter bar */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+        padding: '8px 18px', borderBottom: '1px solid var(--border)',
+        background: 'var(--surface-1)', flexShrink: 0,
+      }}>
+        <div style={{ position: 'relative', minWidth: 200 }}>
+          <Search size={12} style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--tx-3)', pointerEvents: 'none' }} />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search error pattern…"
+            style={{ width: '100%', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: '5px 10px 5px 26px', fontSize: 12, color: 'var(--tx-1)', boxSizing: 'border-box' }}
+          />
+        </div>
+
+        <span style={{ fontSize: 10, color: 'var(--tx-3)', fontWeight: 700, letterSpacing: '.06em' }}>SEV</span>
+        {(['P1', 'P2', 'P3', 'P4'] as const).map(s => {
+          const active = severityFilter.includes(s)
+          const col = SEV[s].color
+          return (
+            <button key={s} onClick={() => toggleSeverity(s)} style={{
+              padding: '3px 9px', borderRadius: 12, fontSize: 11, fontWeight: 700,
+              background: active ? col + '22' : 'var(--surface-2)', color: active ? col : 'var(--tx-2)',
+              border: `1px solid ${active ? col + '66' : 'var(--border)'}`, cursor: 'pointer',
+            }}>{s}</button>
+          )
+        })}
+
+        <span style={{ fontSize: 10, color: 'var(--tx-3)', fontWeight: 700, letterSpacing: '.06em', marginLeft: 4 }}>ROUTING</span>
+        {(['BACKEND', 'MOBILE', 'WEB'] as const).map(rt => {
+          const active = routingFilter.includes(rt)
+          const rc = ROUTING_COLORS[rt]
+          return (
+            <button key={rt} onClick={() => toggleRouting(rt)} style={{
+              padding: '3px 9px', borderRadius: 12, fontSize: 11, fontWeight: 600,
+              background: active ? rc.bg : 'var(--surface-2)', color: active ? rc.color : 'var(--tx-2)',
+              border: `1px solid ${active ? rc.border : 'var(--border)'}`, cursor: 'pointer',
+            }}>{rt}</button>
+          )
+        })}
+
+        {componentOptions.length > 0 && (
+          <select value={componentFilter} onChange={e => setComponentFilter(e.target.value)} style={{ fontSize: 11, background: 'var(--surface-2)', color: 'var(--tx-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '4px 7px' }}>
+            <option value="all">All components</option>
+            {componentOptions.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
+
+        <span style={{ fontSize: 10, color: 'var(--tx-3)', fontWeight: 700, letterSpacing: '.06em', marginLeft: 4 }}>SORT</span>
+        <select value={sortBy} onChange={e => setSortBy(e.target.value as SortMode)} style={{ fontSize: 11, background: 'var(--surface-2)', color: 'var(--tx-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '4px 7px' }}>
+          <option value="count">Most reports</option>
+          <option value="severity">Highest severity</option>
+          <option value="recent">Most recent</option>
+          <option value="oldest">Oldest first</option>
+          <option value="component">Component (A–Z)</option>
+        </select>
+
+        {activeFilterCount > 0 && (
+          <button onClick={clearAllFilters} style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 'auto', fontSize: 11, color: 'var(--tx-3)', background: 'none', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '3px 9px', cursor: 'pointer' }}>
+            <X size={11} /> Clear ({activeFilterCount})
+          </button>
+        )}
+      </div>
+
       {/* Toolbar */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',

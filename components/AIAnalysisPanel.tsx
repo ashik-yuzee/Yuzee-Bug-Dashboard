@@ -280,14 +280,8 @@ export default function AIAnalysisPanel({ bugs, stats, onClose }: Props) {
     }
   }, [bugs, stats])
 
-  // Auto-start on mount — deferred a tick so the effect body itself never
-  // synchronously calls a state setter (runAnalysis sets loading state
-  // before its first await).
-  useEffect(() => {
-    const id = setTimeout(() => { runAnalysis() }, 0)
-    return () => clearTimeout(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // Auto-start on mount
+  useEffect(() => { runAnalysis() }, [])
 
   const handleCancel = () => {
     abortRef.current?.abort()

@@ -435,15 +435,15 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
   const yestCount    = useMemo(() => bugs.filter(b => (b.timestamp_utc || b.created_at).slice(0,10) === yesterdayStr).length, [bugs, yesterdayStr])
   const dupRate      = stats.total > 0 ? Math.round((stats.duplicateCount / stats.total) * 100) : 0
 
-  /* integration health — derived from last 100 bugs */
+  /* integration health — derived from all bugs in the selected range */
   const integ = useMemo(() => {
-    const sl = bugs.slice(0, 100)
-    const n  = Math.max(sl.length, 1)
-    const rb = sl.filter(b => b.rollbar_id || b.rollbarItemId).length
-    const cw = sl.filter(b => b.correlation_id).length
-    const ai = sl.filter(b => b.ai_summary).length
-    const ur = sl.filter(b => b.source === 'user_report' || b.source === 'yuzee_app').length
+    const n  = Math.max(bugs.length, 1)
+    const rb = bugs.filter(b => b.rollbar_id || b.rollbarItemId).length
+    const cw = bugs.filter(b => b.correlation_id).length
+    const ai = bugs.filter(b => b.ai_summary).length
+    const ur = bugs.filter(b => b.source === 'user_report' || b.source === 'yuzee_app').length
     return {
+      total:       n,
       rollbar:     { pct: Math.round(rb/n*100), n: rb },
       cloudwatch:  { pct: Math.round(cw/n*100), n: cw },
       aiTriage:    { pct: Math.round(ai/n*100), n: ai },
@@ -686,10 +686,10 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
             All are then processed by n8n and triaged by Gemini — 100% of bugs go through that pipeline.
           </p>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12 }}>
-            <IntegCard name="Rollbar"        icon={<Radio      size={15}/>} color="#3b82f6" pct={integ.rollbar.pct}     detail={`${integ.rollbar.n} of last 100 bugs — auto-detected backend/mobile errors with stack traces & occurrence counts`} />
-            <IntegCard name="CloudWatch"     icon={<Activity   size={15}/>} color="#2dd4bf" pct={integ.cloudwatch.pct}  detail={`${integ.cloudwatch.n} of last 100 bugs have correlation_id — enables ±15 min CloudWatch log window links`} />
-            <IntegCard name="User-Reported"  icon={<Cloud      size={15}/>} color="#f97316" pct={integ.userReports.pct} detail={`${integ.userReports.n} of last 100 bugs were manually submitted via the app — source: user_report / yuzee_app`} />
-            <IntegCard name="AI Triage"      icon={<Cpu        size={15}/>} color="#a371f7" pct={integ.aiTriage.pct}    detail={`${integ.aiTriage.n} of last 100 bugs have Gemini-generated ai_summary — pipeline ${integ.aiTriage.pct > 50 ? 'healthy' : 'needs attention'}`} />
+            <IntegCard name="Rollbar"        icon={<Radio      size={15}/>} color="#3b82f6" pct={integ.rollbar.pct}     detail={`${integ.rollbar.n} of ${integ.total} bugs — auto-detected backend/mobile errors with stack traces & occurrence counts`} />
+            <IntegCard name="CloudWatch"     icon={<Activity   size={15}/>} color="#2dd4bf" pct={integ.cloudwatch.pct}  detail={`${integ.cloudwatch.n} of ${integ.total} bugs have correlation_id — enables ±15 min CloudWatch log window links`} />
+            <IntegCard name="User-Reported"  icon={<Cloud      size={15}/>} color="#f97316" pct={integ.userReports.pct} detail={`${integ.userReports.n} of ${integ.total} bugs were manually submitted via the app — source: user_report / yuzee_app`} />
+            <IntegCard name="AI Triage"      icon={<Cpu        size={15}/>} color="#a371f7" pct={integ.aiTriage.pct}    detail={`${integ.aiTriage.n} of ${integ.total} bugs have Gemini-generated ai_summary — pipeline ${integ.aiTriage.pct > 50 ? 'healthy' : 'needs attention'}`} />
           </div>
         </section>
 

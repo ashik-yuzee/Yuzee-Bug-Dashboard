@@ -45,6 +45,12 @@ function adfToPlainText(node: unknown): string {
   return ''
 }
 
+// Strip lone Unicode surrogates (U+D800–U+DFFF) that Postgres rejects with 22P02.
+// These appear in Jira ticket text when emoji are encoded as unpaired surrogates.
+function stripSurrogates(s: string): string {
+  return s.replace(/[\uD800-\uDFFF]/g, '�')
+}
+
 /** POST /api/jira/sync-tickets — mirrors every YSC issue into internal_tickets (upsert by jira_key). */
 export async function POST() {
   const denied = await checkAuth()
@@ -62,8 +68,8 @@ export async function POST() {
         ticket_key: issue.key,
         jira_key: issue.key,
         jira_url: jiraBrowseUrl(issue.key),
-        title: (f.summary || issue.key).slice(0, 500),
-        description: adfToPlainText(f.description).slice(0, 5000) || null,
+        title: stripSurrogates((f.summary || issue.key).slice(0, 500)),
+        description: stripSurrogates(adfToPlainText(f.description).slice(0, 5000)) || null,
         type: 'bug' as const,
         status: mapStatus(f.status?.name),
         priority: PRIORITY_TO_P[priorityName] || null,
@@ -103,7 +109,8 @@ export async function POST() {
 
     return NextResponse.json({ synced: rows.length, ysc: yscIssues.length, ysdt: ysdtIssues.length })
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Failed to sync Jira tickets'
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[sync-tickets] error:', msg, err)
     return NextResponse.json({ error: msg }, { status: 500 })
   }
 }

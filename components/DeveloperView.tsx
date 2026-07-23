@@ -2,16 +2,9 @@
 
 import type { ParsedBug, DashboardStats } from '@/lib/bugUtils'
 import { ROUTING_COLORS } from '@/lib/utils'
-import { useInternalTickets } from '@/hooks/useInternalTickets'
-import PageInfo from './ui/PageInfo'
-import { ExternalLink, AlertTriangle, User, Ticket as TicketIcon } from 'lucide-react'
+import { ExternalLink, AlertTriangle, User } from 'lucide-react'
 
-interface Props {
-  bugs: ParsedBug[]
-  stats: DashboardStats
-  onViewBugs?: (routing: string) => void
-  onViewTickets?: (assignee: string) => void
-}
+interface Props { bugs: ParsedBug[]; stats: DashboardStats; onViewBugs?: (routing: string) => void }
 
 const SEV: Record<string, string> = { P1: 'var(--p1)', P2: 'var(--p2)', P3: 'var(--p3)', P4: 'var(--p4)' }
 
@@ -35,7 +28,7 @@ function Bar({ value, max, color }: { value: number; max: number; color: string 
   )
 }
 
-function DevCard({ dev, bugs, onView, openTicketCount, onViewTickets }: { dev: Dev; bugs: ParsedBug[]; onView?: () => void; openTicketCount: number; onViewTickets?: () => void }) {
+function DevCard({ dev, bugs, onView }: { dev: Dev; bugs: ParsedBug[]; onView?: () => void }) {
   const rc = dev.routing !== 'Unknown' ? ROUTING_COLORS[dev.routing as 'BACKEND' | 'MOBILE' | 'WEB'] : null
 
   const total   = bugs.length
@@ -120,27 +113,18 @@ function DevCard({ dev, bugs, onView, openTicketCount, onViewTickets }: { dev: D
         )}
       </div>
 
-      {/* View links */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        {onView && (
-          <button onClick={onView} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 600, color: rc?.color || 'var(--orange)', background: rc ? rc.bg : 'var(--orange-dim)', border: `1px solid ${rc ? rc.border : 'rgba(249,115,22,.25)'}`, borderRadius: 'var(--r-md)', padding: '5px 12px', cursor: 'pointer', transition: 'opacity .15s' }}>
-            View their bugs <ExternalLink size={11} aria-hidden />
-          </button>
-        )}
-        {onViewTickets && (
-          <button onClick={onViewTickets} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 600, color: 'var(--tx-2)', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: '5px 12px', cursor: 'pointer', transition: 'opacity .15s' }}>
-            <TicketIcon size={11} aria-hidden /> {openTicketCount} open ticket{openTicketCount === 1 ? '' : 's'}
-          </button>
-        )}
-      </div>
+      {/* View link */}
+      {onView && (
+        <button onClick={onView} style={{ display: 'flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start', fontSize: 12, fontWeight: 600, color: rc?.color || 'var(--orange)', background: rc ? rc.bg : 'var(--orange-dim)', border: `1px solid ${rc ? rc.border : 'rgba(249,115,22,.25)'}`, borderRadius: 'var(--r-md)', padding: '5px 12px', cursor: 'pointer', transition: 'opacity .15s' }}>
+          View their bugs <ExternalLink size={11} aria-hidden />
+        </button>
+      )}
     </div>
   )
 }
 
-export default function DeveloperView({ bugs, stats, onViewBugs, onViewTickets }: Props) {
+export default function DeveloperView({ bugs, stats, onViewBugs }: Props) {
   const unresolvedBugs = bugs.filter(b => b.status !== 'complete' && b.status !== 'resolved')
-  const { tickets } = useInternalTickets()
-  const openTicketsFor = (name: string) => tickets.filter(t => t.assignee === name && t.status !== 'done').length
 
   const devBugs = (dev: Dev) => {
     if (dev.routing === 'Unknown') {
@@ -161,11 +145,6 @@ export default function DeveloperView({ bugs, stats, onViewBugs, onViewTickets }
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
-
-      <PageInfo storageKey="developer">
-        Per-developer workload, worked out automatically from where each bug was routed (BACKEND/MOBILE/WEB) — not
-        manual assignment. Includes open Internal Tickets assigned to them alongside their automated bug load.
-      </PageInfo>
 
       {/* Summary header */}
       <div style={{ marginBottom: 20, padding: '14px 18px', background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
@@ -202,8 +181,6 @@ export default function DeveloperView({ bugs, stats, onViewBugs, onViewTickets }
             dev={dev}
             bugs={devBugList}
             onView={onViewBugs ? () => onViewBugs(dev.routing) : undefined}
-            openTicketCount={openTicketsFor(dev.name)}
-            onViewTickets={onViewTickets ? () => onViewTickets(dev.name) : undefined}
           />
         ))}
       </div>

@@ -7,13 +7,12 @@ import { useGeminiQueue } from '@/hooks/useGeminiQueue'
 import { Cloud, Sparkles, Loader2 } from 'lucide-react'
 import geminiLimiter from '@/lib/rateLimiter'
 import { withRetry } from '@/lib/withRetry'
-import PageInfo from './ui/PageInfo'
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts'
 
-interface Props { bugs: ParsedBug[]; stats: DashboardStats; onNavigateToBugs?: (f: Record<string, string[] | string>) => void }
+interface Props { bugs: ParsedBug[]; stats: DashboardStats }
 type TimeRange = 'today' | '7d' | '30d'
 
 const P_COLORS: Record<string, string> = { P1: '#ef4444', P2: '#f59e0b', P3: '#3b82f6', P4: '#6b7280' }
@@ -84,8 +83,7 @@ function buildVolumeTrend(bugs: ParsedBug[], days: number) {
     }
   }
   return Object.entries(map).map(([date, counts]) => ({
-    date: date.slice(5), // MM-DD (display label)
-    fullDate: date,      // YYYY-MM-DD (for filtering)
+    date: date.slice(5), // MM-DD
     ...counts,
   }))
 }
@@ -112,68 +110,7 @@ function buildResolutionRate(bugs: ParsedBug[], weeks: number) {
   return result
 }
 
-/* ─── Duplicate rate per week ─── */
-function buildDuplicateRate(bugs: ParsedBug[], weeks: number) {
-  const now = Date.now()
-  const result: { week: string; pct: number; total: number; duplicates: number }[] = []
-  for (let w = weeks - 1; w >= 0; w--) {
-    const start = now - (w + 1) * 7 * 86_400_000
-    const end   = now - w * 7 * 86_400_000
-    const weekBugs = bugs.filter(b => {
-      const t = new Date(b.timestamp_utc || b.created_at).getTime()
-      return t >= start && t < end
-    })
-    const duplicates = weekBugs.filter(b => b.is_duplicate).length
-    result.push({
-      week: `W-${w === 0 ? 'now' : w}`,
-      total: weekBugs.length,
-      duplicates,
-      pct: weekBugs.length > 0 ? Math.round((duplicates / weekBugs.length) * 100) : 0,
-    })
-  }
-  return result
-}
-
-/* ─── Component × Severity matrix ─── */
-interface ComponentSeverityRow { component: string; P1: number; P2: number; P3: number; P4: number; total: number }
-function buildComponentSeverityMatrix(bugs: ParsedBug[]): ComponentSeverityRow[] {
-  const map: Record<string, { P1: number; P2: number; P3: number; P4: number }> = {}
-  for (const b of bugs) {
-    const comp = b.component || 'Unknown'
-    const sev = (['P1', 'P2', 'P3', 'P4'].includes(b.severity || '') ? b.severity : 'P4') as 'P1' | 'P2' | 'P3' | 'P4'
-    if (!map[comp]) map[comp] = { P1: 0, P2: 0, P3: 0, P4: 0 }
-    map[comp][sev]++
-  }
-  return Object.entries(map)
-    .map(([component, counts]) => ({ component, ...counts, total: counts.P1 + counts.P2 + counts.P3 + counts.P4 }))
-    .sort((a, b) => b.total - a.total)
-    .slice(0, 10)
-}
-
-/* ─── P1/P2 response time: days from bug creation to Jira ticket, by week ─── */
-function buildP12ResponseTime(bugs: ParsedBug[]) {
-  const p12 = bugs.filter(b => (b.severity === 'P1' || b.severity === 'P2') && b.jira_key && b.triaged_at)
-  if (p12.length === 0) return []
-  const nowMs = Date.now()
-  const weeks: Record<string, { sum: number; count: number }> = {}
-  for (const b of p12) {
-    const t = new Date(b.timestamp_utc || b.created_at).getTime()
-    const triagedAt = new Date(b.triaged_at!).getTime()
-    const days = Math.round((triagedAt - t) / 86_400_000 * 10) / 10
-    if (days < 0 || days > 30) continue
-    const weeksAgo = Math.floor((nowMs - t) / (7 * 86_400_000))
-    const wk = `W-${Math.min(weeksAgo, 11)}`
-    if (!weeks[wk]) weeks[wk] = { sum: 0, count: 0 }
-    weeks[wk].sum += days
-    weeks[wk].count++
-  }
-  return Object.entries(weeks).sort(([a], [b]) => b.localeCompare(a)).map(([week, { sum, count }]) => ({
-    week, avgDays: Math.round((sum / count) * 10) / 10,
-  }))
-}
-
-export default function Reports({ bugs, onNavigateToBugs }: Props) {
-  const goToBugs = onNavigateToBugs || (() => {})
+export default function Reports({ bugs }: Props) {
   const [timeRange, setTimeRange] = useState<TimeRange>('30d')
   const [aiSummary, setAiSummary]   = useState('')
   const [aiLoading, setAiLoading]   = useState(false)
@@ -186,12 +123,9 @@ export default function Reports({ bugs, onNavigateToBugs }: Props) {
 
   const volumeTrend = useMemo(() => buildVolumeTrend(filtered, timeRange === '30d' ? 30 : timeRange === '7d' ? 7 : 1), [filtered, timeRange])
   const resolutionRate = useMemo(() => buildResolutionRate(filtered, 12), [filtered])
-  const duplicateRate = useMemo(() => buildDuplicateRate(filtered, 12), [filtered])
-  const componentMatrix = useMemo(() => buildComponentSeverityMatrix(filtered), [filtered])
 
   const componentData = useMemo(() => s.componentBreakdown.slice(0, 10).map(c => ({ name: c.component, value: c.count, p1: c.P1, p2: c.P2 })), [s.componentBreakdown])
   const routingData = useMemo(() => s.routingBreakdown.map(r => ({ name: r.routing, value: r.count })), [s.routingBreakdown])
-  const p12ResponseData = useMemo(() => buildP12ResponseTime(filtered), [filtered])
 
   /* Avg triage time per day from gemini_queue */
   const triageTrend = useMemo(() => {
@@ -277,18 +211,14 @@ Be specific, actionable, and professional. No fluff.`
     } finally { setAiLoading(false) }
   }, [s, filtered, timeRange])
 
+  const userBugs = filtered.filter(b => b.source === 'user_report' || b.source === 'yuzee_app')
+
   const maxMod = s.moduleBreakdown[0]?.count || 1
   const maxEnv = s.environmentBreakdown[0]?.count || 1
   const maxSrc = s.sourceBreakdown[0]?.count || 1
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }} className="anim-fadein">
-
-      <PageInfo storageKey="reports">
-        Deeper analytics for retrospectives and reporting upward — trends, response times, resolution rates, and
-        duplicate rates over weeks rather than days. Charts and table rows are clickable and jump straight to the
-        matching bugs in Bug Reports.
-      </PageInfo>
 
       {/* Time range selector */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 24 }}>
@@ -316,16 +246,7 @@ Be specific, actionable, and professional. No fluff.`
                 <Tooltip contentStyle={TOOLTIP_STYLE} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 {['P1', 'P2', 'P3', 'P4'].map(sev => (
-                  <Line
-                    key={sev} type="monotone" dataKey={sev} stroke={P_COLORS[sev]} strokeWidth={2} dot={false} name={sev}
-                    activeDot={{
-                      r: 5, cursor: 'pointer',
-                      onClick: (props: unknown) => {
-                        const d = (props as { payload?: { fullDate?: string } })?.payload?.fullDate
-                        if (d) goToBugs({ severity: [sev], dateFrom: d, dateTo: d })
-                      },
-                    }}
-                  />
+                  <Line key={sev} type="monotone" dataKey={sev} stroke={P_COLORS[sev]} strokeWidth={2} dot={false} name={sev} />
                 ))}
               </LineChart>
             </ResponsiveContainer>
@@ -380,10 +301,7 @@ Be specific, actionable, and professional. No fluff.`
                   <XAxis type="number" tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} />
                   <YAxis type="category" dataKey="name" tick={{ fill: '#c9d1d9', fontSize: 11 }} width={80} tickLine={false} axisLine={false} />
                   <Tooltip contentStyle={TOOLTIP_STYLE} />
-                  <Bar
-                    dataKey="value" fill="#f97316" radius={[0, 3, 3, 0]} name="Bugs" cursor="pointer"
-                    onClick={(d: { payload?: { name?: string } }) => d?.payload?.name && goToBugs({ component: [d.payload.name] })}
-                  />
+                  <Bar dataKey="value" fill="#f97316" radius={[0, 3, 3, 0]} name="Bugs" />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -396,7 +314,7 @@ Be specific, actionable, and professional. No fluff.`
               <>
                 <ResponsiveContainer width="100%" height={180}>
                   <PieChart>
-                    <Pie data={routingData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} paddingAngle={3} dataKey="value" cursor="pointer" onClick={(d: { name?: string }) => d?.name && goToBugs({ platform: [d.name] })}>
+                    <Pie data={routingData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} paddingAngle={3} dataKey="value">
                       {routingData.map((entry, i) => (
                         <Cell key={entry.name} fill={ROUTE_COLORS[entry.name] || `hsl(${i * 90}, 60%, 55%)`} />
                       ))}
@@ -406,7 +324,7 @@ Be specific, actionable, and professional. No fluff.`
                 </ResponsiveContainer>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 4 }}>
                   {routingData.map(r => (
-                    <div key={r.name} onClick={() => goToBugs({ platform: [r.name] })} style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+                    <div key={r.name} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                       <div style={{ width: 10, height: 10, borderRadius: '50%', background: ROUTE_COLORS[r.name] || '#666' }} />
                       <span style={{ fontSize: 11, color: 'var(--tx-2)' }}>{r.name}: {r.value}</span>
                     </div>
@@ -419,76 +337,38 @@ Be specific, actionable, and professional. No fluff.`
 
         {/* Chart 6 — P1/P2 response time proxy */}
         <Card title="P1/P2 Bug Response Time" sub="Days from bug creation to Jira ticket · by week">
-          {p12ResponseData.length === 0 ? (
-            <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No P1/P2 bugs with Jira tickets yet</p>
-          ) : (
-            <ResponsiveContainer width="100%" height={180}>
-              <BarChart data={p12ResponseData} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
-                <XAxis dataKey="week" tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} />
-                <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} unit="d" />
-                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: unknown) => [`${v} days`, 'Avg response']} />
-                <Bar dataKey="avgDays" fill="#ef4444" radius={[3, 3, 0, 0]} name="Avg days to Jira" />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </Card>
-
-        {/* Chart 7 — Duplicate rate + Component×Severity matrix */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-          <Card title="Duplicate Rate Over Time" sub="% of bugs identified as duplicates · last 12 weeks">
-            {duplicateRate.every(r => r.total === 0) ? (
-              <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No data for this period</p>
-            ) : (
-              <ResponsiveContainer width="100%" height={160}>
-                <LineChart data={duplicateRate} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+          {(() => {
+            const p12 = filtered.filter(b => (b.severity === 'P1' || b.severity === 'P2') && b.jira_key && b.triaged_at)
+            if (p12.length === 0) return <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No P1/P2 bugs with Jira tickets yet</p>
+            const weeks: Record<string, { sum: number; count: number }> = {}
+            for (const b of p12) {
+              const t = new Date(b.timestamp_utc || b.created_at).getTime()
+              const triagedAt = new Date(b.triaged_at!).getTime()
+              const days = Math.round((triagedAt - t) / 86_400_000 * 10) / 10
+              if (days < 0 || days > 30) continue
+              const now = Date.now()
+              const weeksAgo = Math.floor((now - t) / (7 * 86_400_000))
+              const wk = `W-${Math.min(weeksAgo, 11)}`
+              if (!weeks[wk]) weeks[wk] = { sum: 0, count: 0 }
+              weeks[wk].sum += days
+              weeks[wk].count++
+            }
+            const data = Object.entries(weeks).sort(([a], [b]) => b.localeCompare(a)).map(([week, { sum, count }]) => ({
+              week, avgDays: Math.round((sum / count) * 10) / 10,
+            }))
+            return (
+              <ResponsiveContainer width="100%" height={180}>
+                <BarChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
                   <XAxis dataKey="week" tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} />
-                  <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} unit="%" domain={[0, 100]} />
-                  <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(val: unknown) => [`${val}%`, 'Duplicate rate']} />
-                  <Line type="monotone" dataKey="pct" stroke="#6b7280" strokeWidth={2} dot={false} name="Duplicate %" />
-                </LineChart>
+                  <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} unit="d" />
+                  <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: unknown) => [`${v} days`, 'Avg response']} />
+                  <Bar dataKey="avgDays" fill="#ef4444" radius={[3, 3, 0, 0]} name="Avg days to Jira" />
+                </BarChart>
               </ResponsiveContainer>
-            )}
-          </Card>
-
-          <Card title="Component × Severity Matrix" sub="Top 10 components broken down by severity — click a cell">
-            {componentMatrix.length === 0 ? (
-              <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No component data</p>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-                  <thead>
-                    <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                      <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--tx-3)', fontWeight: 600 }}>Component</th>
-                      {(['P1', 'P2', 'P3', 'P4'] as const).map(sev => (
-                        <th key={sev} style={{ textAlign: 'center', padding: '4px 6px', color: P_COLORS[sev], fontWeight: 700 }}>{sev}</th>
-                      ))}
-                      <th style={{ textAlign: 'right', padding: '4px 6px', color: 'var(--tx-3)', fontWeight: 600 }}>Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {componentMatrix.map(row => (
-                      <tr key={row.component} style={{ borderBottom: '1px solid var(--border)' }}>
-                        <td style={{ padding: '5px 6px', color: 'var(--tx-1)', cursor: 'pointer' }} onClick={() => goToBugs({ component: [row.component] })}>{row.component}</td>
-                        {(['P1', 'P2', 'P3', 'P4'] as const).map(sev => (
-                          <td
-                            key={sev}
-                            onClick={() => row[sev] > 0 && goToBugs({ component: [row.component], severity: [sev] })}
-                            style={{ textAlign: 'center', padding: '5px 6px', color: row[sev] > 0 ? P_COLORS[sev] : 'var(--tx-3)', fontWeight: row[sev] > 0 ? 700 : 400, cursor: row[sev] > 0 ? 'pointer' : 'default' }}
-                          >
-                            {row[sev] || '—'}
-                          </td>
-                        ))}
-                        <td style={{ textAlign: 'right', padding: '5px 6px', color: 'var(--tx-2)', fontWeight: 600 }}>{row.total}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Card>
-        </div>
+            )
+          })()}
+        </Card>
 
         {/* Existing charts row */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
@@ -499,7 +379,7 @@ Be specific, actionable, and professional. No fluff.`
                   {s.moduleBreakdown.map(m => {
                     const col = MODULE_COLOR[m.module] || 'var(--orange)'
                     return (
-                      <div key={m.module} onClick={() => goToBugs({ module: [m.module] })} style={{ cursor: 'pointer' }}>
+                      <div key={m.module}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                             <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: `${col}22`, color: col, border: `1px solid ${col}44` }}>{m.module}</span>
@@ -527,7 +407,7 @@ Be specific, actionable, and professional. No fluff.`
                     const col = isProd ? 'var(--danger)' : e.env === 'kubernetes' ? 'var(--warning)' : 'var(--tx-3)'
                     const pct = s.total > 0 ? Math.round((e.count / s.total) * 100) : 0
                     return (
-                      <div key={e.env} onClick={() => goToBugs({ environment: [e.env] })} style={{ cursor: 'pointer' }}>
+                      <div key={e.env}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ fontSize: 12, color: col, fontWeight: isProd ? 600 : 400 }}>{e.env}</span>
@@ -552,7 +432,7 @@ Be specific, actionable, and professional. No fluff.`
                   {s.sourceBreakdown.map(src => {
                     const col = src.source === 'rollbar_auto' ? 'var(--info)' : src.source === 'user_report' ? 'var(--warning)' : 'var(--success)'
                     return (
-                      <div key={src.source} onClick={() => goToBugs({ source: [src.source] })} style={{ cursor: 'pointer' }}>
+                      <div key={src.source}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                           <span style={{ fontSize: 12, color: 'var(--tx-1)' }}>{SOURCE_LABEL[src.source] || src.source}</span>
                           <span style={{ fontSize: 12, color: 'var(--tx-2)' }}>{src.count} <span style={{ color: 'var(--tx-3)' }}>({src.percentage}%)</span></span>
@@ -573,7 +453,7 @@ Be specific, actionable, and professional. No fluff.`
                     const pct = s.total > 0 ? Math.round((et.count / s.total) * 100) : 0
                     const maxEt = s.errorTypeBreakdown[0]?.count || 1
                     return (
-                      <div key={et.type} onClick={() => goToBugs({ errorType: [et.type] })} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                      <div key={et.type} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span className="font-mono" style={{ fontSize: 10, fontWeight: 600, color: 'var(--tx-2)', minWidth: 80, flexShrink: 0 }}>{et.type}</span>
                         <Bar2 value={et.count} max={maxEt} color="var(--orange)" />
                         <span style={{ fontSize: 11, color: 'var(--tx-2)', minWidth: 22, textAlign: 'right' }}>{et.count}</span>
@@ -609,7 +489,7 @@ Be specific, actionable, and professional. No fluff.`
           )}
           {!aiSummary && !aiLoading && (
             <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>
-              Click &quot;Generate Report&quot; to get an AI-generated standup summary.
+              Click "Generate Report" to get an AI-generated standup summary.
             </p>
           )}
         </div>

@@ -36,7 +36,7 @@ export default function TicketsList({ tickets, onOpen, linkedJiraKeys }: Props) 
   const selectStyle: React.CSSProperties = { fontSize: 11, background: 'var(--surface-2)', color: 'var(--tx-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '4px 7px' }
 
   return (
-    <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+    <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden', flexShrink: 0 }}>
       <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <select style={selectStyle} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="all">All statuses</option>

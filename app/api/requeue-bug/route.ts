@@ -34,12 +34,13 @@ export async function PATCH(request: NextRequest) {
     }
 
     if (id) {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('gemini_queue')
         .update({ status: 'queued' })
         .eq('id', id)
+        .select('id')
       if (error) throw error
-      return NextResponse.json({ requeued: 1 })
+      return NextResponse.json({ requeued: data?.length ?? 0 })
     }
 
     return NextResponse.json({ error: 'Provide ?id=<id> or ?all=true' }, { status: 400 })

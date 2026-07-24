@@ -68,7 +68,7 @@ async function fetchDataQualityCounts(): Promise<Record<string, number>> {
 }
 
 /* ─── Data quality row ─────────────────────────────────────── */
-interface QualityRow { issue: string; count: number | null; loading: boolean; action?: () => Promise<void>; actionLabel?: string }
+interface QualityRow { issue: string; count: number | null; loading: boolean; action?: () => Promise<void>; actionLabel?: string; actionLoading?: boolean }
 
 function QualityTable({ rows }: { rows: QualityRow[] }) {
   return (
@@ -95,7 +95,8 @@ function QualityTable({ rows }: { rows: QualityRow[] }) {
             </td>
             <td style={{ padding: '9px 10px' }}>
               {row.action && row.count !== null && row.count > 0 && (
-                <button onClick={row.action} style={{ fontSize: 11, fontWeight: 600, color: 'var(--orange)', background: 'var(--orange-dim)', border: '1px solid rgba(249,115,22,.25)', borderRadius: 'var(--r-sm)', padding: '3px 9px', cursor: 'pointer' }}>
+                <button onClick={row.action} disabled={row.actionLoading} style={{ fontSize: 11, fontWeight: 600, color: 'var(--orange)', background: 'var(--orange-dim)', border: '1px solid rgba(249,115,22,.25)', borderRadius: 'var(--r-sm)', padding: '3px 9px', cursor: row.actionLoading ? 'not-allowed' : 'pointer', opacity: row.actionLoading ? 0.6 : 1, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  {row.actionLoading ? <Loader2 size={10} className="anim-spin" /> : null}
                   {row.actionLabel || 'Retry all →'}
                 </button>
               )}
@@ -169,15 +170,30 @@ export default function PipelineTab() {
     } finally { setRequeuingAll(false) }
   }
 
+  const [retryingJira, setRetryingJira] = useState(false)
   const retryJira = async () => {
-    toast.info('Jira retry', 'Manual retry not automated yet — check n8n workflow')
+    setRetryingJira(true)
+    try {
+      const res  = await fetch('/api/jira/retry', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+      toast.success(
+        'Jira retry complete',
+        `${data.succeeded}/${data.retried} tickets created${data.failed ? ` · ${data.failed} failed` : ''}`,
+      )
+      refresh()
+    } catch (err) {
+      toast.error('Jira retry failed', err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setRetryingJira(false)
+    }
   }
 
   const qualityRows: QualityRow[] = [
     { issue: 'Missing correlation_id (Rollbar bugs only)', count: dq.missingCorrel ?? null, loading: dqLoading },
     { issue: 'Missing rollbar_id (user-submitted — expected)', count: null, loading: false },
     { issue: 'Missing jira_key AND NOT jira_pending (pipeline gap)', count: dq.missingJiraNotPending ?? null, loading: dqLoading },
-    { issue: 'jira_pending = true (ticket creation failed)', count: dq.jiraPending ?? null, loading: dqLoading, action: retryJira, actionLabel: 'Retry all →' },
+    { issue: 'jira_pending = true (ticket creation failed)', count: dq.jiraPending ?? null, loading: dqLoading, action: retryJira, actionLabel: 'Retry all →', actionLoading: retryingJira },
     { issue: 'ai_summary null (Gemini triage incomplete)', count: dq.aiSummaryNull ?? null, loading: dqLoading },
     { issue: 'component = Unknown (Gemini couldn\'t classify)', count: dq.unknownComp ?? null, loading: dqLoading },
     { issue: 'Missing severity (triage not run)', count: dq.missingSev ?? null, loading: dqLoading },

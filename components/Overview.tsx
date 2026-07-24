@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts'
@@ -386,14 +386,92 @@ function TicketsWidget({ onNavigate }: { onNavigate?: () => void }) {
   )
 }
 
+/* ─── posthog overview widget ───────────────────────────────────── */
+interface PHSnap { dau: number; mau: number; sessions: number; bounceRate: number; avgSessionSec: number; topCustomEvents: { event: string; count: number }[] }
+
+function PostHogOverviewWidget({ onNavigate }: { onNavigate?: () => void }) {
+  const [data, setData]       = useState<PHSnap | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    fetch('/api/posthog/analytics?type=overview')
+      .then(r => r.json())
+      .then(j => { if (!cancelled) { if (j.error) setError(j.error); else setData(j as PHSnap) } })
+      .catch(e => { if (!cancelled) setError(String(e)) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  const fmtN = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n)
+  const fmtDur = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14 }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(139,92,246,.15)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <BarChart2 size={13} color="#8b5cf6" />
+            </div>
+            <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif' }}>PostHog Analytics</p>
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 3, marginLeft: 32 }}>Live product metrics · click for full analytics</p>
+        </div>
+        {onNavigate && (
+          <button onClick={onNavigate} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: '#8b5cf6', background: 'rgba(139,92,246,.12)', border: '1px solid rgba(139,92,246,.3)', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
+            Full analytics →
+          </button>
+        )}
+      </div>
+
+      {error ? (
+        <p style={{ fontSize: 11, color: 'var(--danger)', padding: '8px 12px', background: 'rgba(239,68,68,.08)', borderRadius: 6 }}>{error}</p>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 10 }}>
+          {[
+            { label: 'DAU', value: loading ? '…' : fmtN(data?.dau ?? 0), color: '#8b5cf6', sub: 'today' },
+            { label: 'MAU', value: loading ? '…' : fmtN(data?.mau ?? 0), color: '#14b8a6', sub: 'this month' },
+            { label: 'Sessions', value: loading ? '…' : fmtN(data?.sessions ?? 0), color: '#3b82f6', sub: 'today' },
+            { label: 'Bounce', value: loading ? '…' : `${data?.bounceRate ?? 0}%`, color: data && data.bounceRate > 65 ? '#ef4444' : '#22c55e', sub: '7-day rate' },
+            { label: 'Avg Session', value: loading ? '…' : fmtDur(data?.avgSessionSec ?? 0), color: '#f97316', sub: '7-day avg' },
+          ].map(k => (
+            <div key={k.label} style={{ background: 'var(--surface-2)', borderRadius: 8, padding: '10px 12px', textAlign: 'center', borderTop: `2px solid ${k.color}` }}>
+              <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{k.label}</p>
+              <p style={{ fontSize: 18, fontWeight: 800, color: k.color, lineHeight: 1, fontVariantNumeric: 'tabular-nums', marginBottom: 2 }}>{k.value}</p>
+              <p style={{ fontSize: 9, color: 'var(--tx-3)' }}>{k.sub}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && !error && data?.topCustomEvents && data.topCustomEvents.length > 0 && (
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+          <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>Top events (7d)</p>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {data.topCustomEvents.slice(0, 4).map(e => (
+              <span key={e.event} style={{ fontSize: 11, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6, padding: '2px 9px', color: 'var(--tx-2)' }}>
+                {e.event} <strong style={{ color: '#8b5cf6' }}>{fmtN(e.count)}</strong>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  )
+}
+
 /* ─── main ──────────────────────────────────────────────────────── */
-export default function Overview({ stats: _globalStats, bugs: allBugs, includeLegacy, onNavigateToBugs, onNavigateToClusters, onNavigateToTickets }: {
+export default function Overview({ stats: _globalStats, bugs: allBugs, includeLegacy, onNavigateToBugs, onNavigateToClusters, onNavigateToTickets, onNavigateToPostHog }: {
   stats: DashboardStats
   bugs: ParsedBug[]
   includeLegacy: boolean
   onNavigateToBugs: (f: Record<string, string[] | string>) => void
   onNavigateToClusters?: () => void
   onNavigateToTickets?: () => void
+  onNavigateToPostHog?: () => void
 }) {
   void _globalStats // superseded by the range-scoped `stats` computed below
 
@@ -706,6 +784,14 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
           <Divider label="Internal Tickets" />
           <div style={{ marginTop: 12 }}>
             <TicketsWidget onNavigate={onNavigateToTickets} />
+          </div>
+        </section>
+
+        {/* 5c ── POSTHOG OVERVIEW ───────────────────────────────── */}
+        <section>
+          <Divider label="Product Analytics (PostHog)" />
+          <div style={{ marginTop: 12 }}>
+            <PostHogOverviewWidget onNavigate={onNavigateToPostHog} />
           </div>
         </section>
 

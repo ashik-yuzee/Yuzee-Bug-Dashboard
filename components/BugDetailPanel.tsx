@@ -117,7 +117,7 @@ function QuickLinkBtn({ href, icon, label, disabled, warning }: {
 }
 
 export default function BugDetailPanel({ bug, onClose, onBugUpdated, onOpenTicket }: Props) {
-  const [acting, setActing] = useState<'requeue' | 'resolve' | 'duplicate' | null>(null)
+  const [acting, setActing] = useState<'requeue' | 'resolve' | 'duplicate' | 'jira_retry' | null>(null)
   const [linkedTicket, setLinkedTicket] = useState<InternalTicket | null | undefined>(undefined)
   const [showTicketModal, setShowTicketModal] = useState(false)
 
@@ -261,6 +261,28 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated, onOpenTicke
       toast.error('Update failed', err instanceof Error ? err.message : 'Unknown')
     } finally { setActing(null) }
   }, [bug.report_id, supabase, onBugUpdated])
+
+  const handleRetryJira = useCallback(async () => {
+    setActing('jira_retry')
+    try {
+      const res  = await fetch('/api/jira/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reportId: bug.report_id }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+      const result = data.results?.[0]
+      if (result?.success) {
+        toast.success('Jira ticket created', result.jiraKey)
+        onBugUpdated?.(bug.report_id, { jira_key: result.jiraKey, jira_pending: null })
+      } else {
+        throw new Error(result?.error ?? 'Ticket creation failed')
+      }
+    } catch (err) {
+      toast.error('Jira retry failed', err instanceof Error ? err.message : 'Unknown')
+    } finally { setActing(null) }
+  }, [bug.report_id, onBugUpdated])
 
   return (
     <div
@@ -614,6 +636,16 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated, onOpenTicke
                 >
                   <RefreshCw size={12} aria-hidden />
                   Re-queue for AI triage
+                </button>
+              )}
+              {bug.jira_pending === true && !bug.jira_key && (
+                <button
+                  onClick={handleRetryJira}
+                  disabled={acting !== null}
+                  style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '8px 13px', borderRadius: 'var(--r-md)', fontSize: 12, fontWeight: 500, background: 'rgba(245,158,11,.1)', color: '#f59e0b', border: '1px solid rgba(245,158,11,.3)', cursor: acting ? 'not-allowed' : 'pointer', opacity: acting ? 0.5 : 1 }}
+                >
+                  {acting === 'jira_retry' ? <RefreshCw size={12} className="anim-spin" aria-hidden /> : <RefreshCw size={12} aria-hidden />}
+                  Retry Jira Ticket Creation
                 </button>
               )}
               {bug.status !== 'resolved' && bug.status !== 'complete' && (

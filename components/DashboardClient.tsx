@@ -28,9 +28,10 @@ import {
   Bug, LogOut, RefreshCw, Sparkles,
   BarChart3, List, Layers, WifiOff, Radio, Bell, Code2, FileText,
   Activity, AlertTriangle, X, History, ShieldCheck, MessageSquare, Calendar,
-  Ticket as TicketIcon, ChevronsLeft, ChevronsRight, BookOpen,
+  Ticket as TicketIcon, ChevronsLeft, ChevronsRight, BookOpen, BarChart2,
 } from 'lucide-react'
 import Reports from './Reports'
+import PostHogTab from './PostHogTab'
 import { isLegacy, LEGACY_CUTOFF_ISO } from '@/lib/utils'
 
 export type BugReport = {
@@ -316,7 +317,7 @@ export type Filters = {
 export type SortConfig = { key: keyof BugReport; dir: 'asc' | 'desc' }
 export type PipelineSubTab = 'queue' | 'quality' | 'cloudwatch'
 export type TriageSubTab = 'rules' | 'feedback' | 'jira'
-type Tab = 'overview' | 'bugs' | 'clusters' | 'pipeline' | 'triage' | 'feedback' | 'developer' | 'reports' | 'daily' | 'tickets' | 'guide'
+type Tab = 'overview' | 'bugs' | 'clusters' | 'pipeline' | 'triage' | 'feedback' | 'developer' | 'reports' | 'daily' | 'tickets' | 'posthog' | 'guide'
 export type TicketsSubTab = 'board' | 'list'
 
 export const BLANK_FILTERS: Filters = {
@@ -611,6 +612,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     { id: 'reports',   label: 'Reports',         icon: <FileText      size={14} aria-hidden /> },
     { id: 'daily',     label: 'Daily Digest',    icon: <Calendar      size={14} aria-hidden /> },
     { id: 'tickets',   label: 'Tickets',         icon: <TicketIcon    size={14} aria-hidden />, badge: openTicketCount },
+    { id: 'posthog',   label: 'PostHog',          icon: <BarChart2     size={14} aria-hidden /> },
   ]
 
   const showJiraBanner    = jiraPendingCount > 0 && !dismissedBanners.has('jira')
@@ -900,6 +902,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                   onNavigateToBugs={navigateToBugs}
                   onNavigateToClusters={() => setActiveTab('clusters')}
                   onNavigateToTickets={() => setActiveTab('tickets')}
+                  onNavigateToPostHog={() => setActiveTab('posthog')}
                 />
               )
             )}
@@ -1055,6 +1058,10 @@ export default function DashboardClient({ user, initialBugs }: Props) {
 
             {activeTab === 'reports' && (
               <Reports bugs={parsedBugs} stats={stats} onNavigateToBugs={navigateToBugs} />
+            )}
+
+            {activeTab === 'posthog' && (
+              <PostHogTab bugs={parsedBugs} />
             )}
 
             {activeTab === 'guide' && (

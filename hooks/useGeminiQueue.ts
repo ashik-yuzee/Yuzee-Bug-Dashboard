@@ -28,15 +28,17 @@ async function fetchQueueStats(): Promise<{ stats: GeminiQueueStats; error: stri
   const thirtyMinsAgo = new Date(Date.now() - 30 * 60_000).toISOString()
 
   try {
+    const COLS = 'id,report_id,status,queued_at,started_at,finished_at,processed_at,retry_count,error_message,n8n_execution_id,created_at'
     const [recentRes, stuckRes] = await withRetry(() => Promise.all([
       supabase
         .from('gemini_queue')
-        .select('*')
+        .select(COLS)
         .gte('created_at', sevenDaysAgo)
-        .order('created_at', { ascending: false }),
+        .order('created_at', { ascending: false })
+        .limit(500),
       supabase
         .from('gemini_queue')
-        .select('*')
+        .select(COLS)
         .eq('status', 'queued')
         .lt('created_at', thirtyMinsAgo),
     ]).then(([recent, stuck]) => {

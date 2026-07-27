@@ -68,6 +68,64 @@
   --shadow-lg: 0 16px 48px rgba(0,0,0,.65);
 }
 
+/* ─── Light theme overrides ─────────────────────────────── */
+/* html.light has specificity (0,0,1)+(0,1,0) = (0,1,1) vs :root (0,1,0) — always wins */
+html.light {
+  /* Surfaces — blue-grey neutral progression */
+  --bg:        #F3F6FB;
+  --surface-1: #FFFFFF;
+  --surface-2: #EEF2F8;
+  --surface-3: #E4EAF3;
+  --hover:     #E8EDF6;
+
+  /* Borders */
+  --border:    #CBD3E1;
+  --border-hi: #9BAABF;
+
+  /* Text — all pass WCAG AA on surface-1 */
+  --tx-1: #1C2333;   /* ~18:1 on white — primary */
+  --tx-2: #3D4F68;   /*  ~8:1 on white — secondary */
+  --tx-3: #5E738A;   /*  ~5:1 on white — muted (AA) */
+
+  /* Brand — shifted darker for light-bg contrast */
+  --orange:       #C2410C;    /* 4.6:1 on white */
+  --orange-dim:   rgba(194,65,12,.10);
+  --orange-ring:  rgba(194,65,12,.40);
+
+  /* Severity — recalibrated for light backgrounds, all pass AA */
+  --p1: #C91B12;   /* 5.1:1 — red */
+  --p2: #A15C07;   /* 4.8:1 — amber */
+  --p3: #1A4FCC;   /* 5.7:1 — blue */
+  --p4: #5E738A;   /* same as --tx-3 */
+
+  /* Semantic */
+  --success: #14693A;  /* 4.8:1 */
+  --warning: #A15C07;  /* 4.8:1 */
+  --danger:  #C91B12;  /* 5.1:1 */
+  --info:    #1A4FCC;  /* 5.7:1 */
+  --purple:  #6D28CE;  /* 5.4:1 */
+
+  /* Dim badge backgrounds (on white surface) */
+  --p1-dim:      rgba(201,27,18,.09);
+  --p2-dim:      rgba(161,92,7,.09);
+  --p3-dim:      rgba(26,79,204,.09);
+  --success-dim: rgba(20,105,58,.09);
+  --danger-dim:  rgba(201,27,18,.09);
+  --purple-dim:  rgba(109,40,206,.09);
+  --info-dim:    rgba(26,79,204,.09);
+
+  /* Shadows — softer on light backgrounds */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.09);
+  --shadow-md: 0 4px 16px rgba(0,0,0,.08);
+  --shadow-lg: 0 16px 48px rgba(0,0,0,.11);
+}
+
+/* Badge border corrections for light theme */
+html.light .badge-p1 { border-color: rgba(201,27,18,.25) }
+html.light .badge-p2 { border-color: rgba(161,92,7,.25) }
+html.light .badge-p3 { border-color: rgba(26,79,204,.25) }
+html.light .badge-p4 { border-color: rgba(94,115,138,.25) }
+
 /* ─── Reset & base ──────────────────────────────────────── */
 *,::before,::after { box-sizing:border-box; margin:0; padding:0 }
 
@@ -80,6 +138,7 @@ html,body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  transition: background-color .25s ease, color .25s ease;
 }
 
 /* Minimum font-size enforcement */

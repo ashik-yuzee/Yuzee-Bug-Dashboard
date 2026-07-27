@@ -9,7 +9,11 @@ async function fetchTickets(): Promise<{ tickets: InternalTicket[]; error: strin
   const supabase = createClient()
   try {
     const { data } = await withRetry(async () => {
-      const res = await supabase.from('internal_tickets').select('*').order('created_at', { ascending: false })
+      const res = await supabase
+        .from('internal_tickets')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(500)
       if (res.error) throw res.error
       return res
     }, { maxRetries: 2, baseDelayMs: 700 })

@@ -24,7 +24,8 @@ export function useRealtimeBugs(): UseRealtimeBugsResult {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .on('postgres_changes' as any, { event: 'INSERT', schema: 'public', table: 'bug_reports' },
         (payload: { new: BugReport }) => {
-          setNewBugs(prev => [payload.new, ...prev])
+          // Cap at 50 to prevent unbounded memory growth in long-running sessions
+          setNewBugs(prev => [payload.new, ...prev].slice(0, 50))
         }
       )
       .subscribe((s: string) => {

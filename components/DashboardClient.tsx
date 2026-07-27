@@ -29,7 +29,9 @@ import {
   BarChart3, List, Layers, WifiOff, Radio, Bell, Code2, FileText,
   Activity, AlertTriangle, X, History, ShieldCheck, MessageSquare, Calendar,
   Ticket as TicketIcon, ChevronsLeft, ChevronsRight, BookOpen, BarChart2,
+  Sun, Moon,
 } from 'lucide-react'
+import { useTheme } from '@/components/ThemeProvider'
 import Reports from './Reports'
 import PostHogTab from './PostHogTab'
 import { isLegacy, LEGACY_CUTOFF_ISO } from '@/lib/utils'
@@ -387,6 +389,7 @@ const S = {
 
 export default function DashboardClient({ user, initialBugs }: Props) {
   const supabase = useMemo(() => createClient(), [])
+  const { theme, toggleTheme } = useTheme()
   const { online } = useNetworkStatus()
   const { newBugs, status: rtStatus, clearNewBugs } = useRealtimeBugs()
   const { stats: queueStats } = useGeminiQueue()
@@ -845,6 +848,21 @@ export default function DashboardClient({ user, initialBugs }: Props) {
               >
                 <History size={13} aria-hidden />
                 Legacy {includeLegacy ? 'on' : 'off'}
+              </button>
+
+              <button
+                onClick={toggleTheme}
+                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                style={{
+                  display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
+                  width:32, height:32,
+                  background:'var(--surface-2)', color:'var(--tx-2)',
+                  border:'1px solid var(--border)', borderRadius:'var(--r-md)',
+                  cursor:'pointer', transition:'all .15s',
+                }}
+              >
+                {theme === 'dark' ? <Sun size={14} aria-hidden /> : <Moon size={14} aria-hidden />}
               </button>
 
               <div style={S.divider} aria-hidden />

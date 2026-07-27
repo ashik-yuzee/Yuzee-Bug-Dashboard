@@ -12,7 +12,12 @@ import {
   BarChart2, Zap, Target, Brain, Clock, DollarSign, ArrowDown, Maximize2, Minimize2,
   Calendar, Flame, UserCheck, Search, X,
 } from 'lucide-react'
-import { ComposableMap, Geographies, Geography } from 'react-simple-maps'
+import {
+  ComposableMap,
+  createCoordinates,
+  Geographies,
+  Geography,
+} from '@vnedyalk0v/react19-simple-maps'
 import { usePostHogAnalytics } from '@/hooks/usePostHogAnalytics'
 import type { ParsedBug } from '@/lib/bugUtils'
 
@@ -2561,7 +2566,7 @@ function WorldMapHeatmap({ countries }: { countries: { name: string; users: numb
   return (
     <div style={{ position: 'relative', userSelect: 'none' }}>
       <ComposableMap
-        projectionConfig={{ scale: 150, center: [0, 10] }}
+        projectionConfig={{ scale: 150, center: createCoordinates(0, 10) }}
         style={{ width: '100%', height: 'auto', background: 'transparent' }}
       >
         <Geographies geography={GEO_URL}>

@@ -29,11 +29,12 @@ import {
   BarChart3, List, Layers, WifiOff, Radio, Bell, Code2, FileText,
   Activity, AlertTriangle, X, History, ShieldCheck, MessageSquare, Calendar,
   Ticket as TicketIcon, ChevronsLeft, ChevronsRight, BookOpen, BarChart2,
-  Sun, Moon,
+  Sun, Moon, Server,
 } from 'lucide-react'
 import { useTheme } from '@/components/ThemeProvider'
 import Reports from './Reports'
 import PostHogTab from './PostHogTab'
+import ServerHealthPage from './ServerHealthPage'
 import { isLegacy, LEGACY_CUTOFF_ISO } from '@/lib/utils'
 
 export type BugReport = {
@@ -319,7 +320,7 @@ export type Filters = {
 export type SortConfig = { key: keyof BugReport; dir: 'asc' | 'desc' }
 export type PipelineSubTab = 'queue' | 'quality' | 'cloudwatch'
 export type TriageSubTab = 'rules' | 'feedback' | 'jira'
-type Tab = 'overview' | 'bugs' | 'clusters' | 'pipeline' | 'triage' | 'feedback' | 'developer' | 'reports' | 'daily' | 'tickets' | 'posthog' | 'guide'
+type Tab = 'overview' | 'bugs' | 'clusters' | 'pipeline' | 'triage' | 'feedback' | 'developer' | 'reports' | 'daily' | 'tickets' | 'posthog' | 'server-health' | 'guide'
 export type TicketsSubTab = 'board' | 'list'
 
 export const BLANK_FILTERS: Filters = {
@@ -396,7 +397,11 @@ export default function DashboardClient({ user, initialBugs }: Props) {
   const { tickets: fetchedTickets, loading: ticketsLoading, error: ticketsError, refresh: refreshTickets } = useInternalTickets()
 
   const [bugs, setBugs] = useState<BugReport[]>(initialBugs)
-  const [activeTab, setActiveTab] = useState<Tab>('overview')
+  const [activeTab, _setActiveTab] = useState<Tab>('overview')
+  const setActiveTab = useCallback((tab: Tab) => {
+    _setActiveTab(tab)
+    history.replaceState(null, '', tab === 'overview' ? window.location.pathname + window.location.search : `#${tab}`)
+  }, [])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [filters, setFilters] = useState<Filters>(BLANK_FILTERS)
   const [sort, setSort] = useState<SortConfig>({ key: 'created_at', dir: 'desc' })
@@ -417,6 +422,13 @@ export default function DashboardClient({ user, initialBugs }: Props) {
       if (localStorage.getItem('yuzee-sidebar-collapsed') === '1') setSidebarCollapsed(true)
     }, 0)
     return () => clearTimeout(id)
+  }, [])
+
+  // Restore active tab from URL hash on mount (survives refresh)
+  useEffect(() => {
+    const VALID_TABS: Tab[] = ['overview','bugs','clusters','pipeline','triage','feedback','developer','reports','daily','tickets','posthog','server-health','guide']
+    const hash = window.location.hash.slice(1) as Tab
+    if (VALID_TABS.includes(hash)) _setActiveTab(hash)
   }, [])
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed(prev => {
@@ -615,7 +627,8 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     { id: 'reports',   label: 'Reports',         icon: <FileText      size={14} aria-hidden /> },
     { id: 'daily',     label: 'Daily Digest',    icon: <Calendar      size={14} aria-hidden /> },
     { id: 'tickets',   label: 'Tickets',         icon: <TicketIcon    size={14} aria-hidden />, badge: openTicketCount },
-    { id: 'posthog',   label: 'PostHog',          icon: <BarChart2     size={14} aria-hidden /> },
+    { id: 'posthog',        label: 'PostHog',        icon: <BarChart2 size={14} aria-hidden /> },
+    { id: 'server-health', label: 'Server Health',  icon: <Server    size={14} aria-hidden /> },
   ]
 
   const showJiraBanner    = jiraPendingCount > 0 && !dismissedBanners.has('jira')
@@ -1080,6 +1093,10 @@ export default function DashboardClient({ user, initialBugs }: Props) {
 
             {activeTab === 'posthog' && (
               <PostHogTab bugs={parsedBugs} />
+            )}
+
+            {activeTab === 'server-health' && (
+              <ServerHealthPage />
             )}
 
             {activeTab === 'guide' && (

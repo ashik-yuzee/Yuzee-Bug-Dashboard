@@ -347,15 +347,28 @@ function PipelineWidget() {
 /* ─── internal tickets widget ────────────────────────────────────── */
 function TicketsWidget({ onNavigate }: { onNavigate?: () => void }) {
   const { tickets, loading, error } = useInternalTickets()
-  const counts = TICKET_STATUSES.map(s => ({ ...s, n: tickets.filter(t => t.status === s.id).length }))
-  const open = tickets.filter(t => t.status !== 'done').length
+  // Only YSDT-prefixed Jira tickets, open only (not done/closed)
+  const ysdtOpen = tickets.filter(t => {
+    const key = t.jira_key ?? t.ticket_key ?? ''
+    if (!key.startsWith('YSDT-')) return false
+    const st = (t.jira_status ?? t.status ?? '').toLowerCase()
+    return st !== 'done' && st !== 'closed' && st !== 'resolved'
+  })
+  const counts = TICKET_STATUSES.map(s => ({ ...s, n: ysdtOpen.filter(t => {
+    const st = (t.jira_status ?? t.status ?? '').toLowerCase()
+    if (s.id === 'todo') return st === 'to do' || st === 'todo' || st === 'open' || t.status === s.id
+    if (s.id === 'in_progress') return st === 'in progress' || st === 'in-progress' || t.status === s.id
+    if (s.id === 'in_review') return st === 'in review' || st === 'in-review' || t.status === s.id
+    return t.status === s.id
+  }).length }))
+  const open = ysdtOpen.length
 
   return (
     <Card>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14 }}>
         <div>
-          <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif' }}>Internal Tickets</p>
-          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 2 }}>internal_tickets · all time</p>
+          <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif' }}>YSDT Open Tickets</p>
+          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 2 }}>Jira YSDT project · open only</p>
         </div>
         <button onClick={onNavigate} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600, color: 'var(--orange)', background: 'var(--orange-dim)', border: '1px solid rgba(249,115,22,.25)', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontFamily: 'inherit' }}>
           <TicketIcon size={11} /> View board →
@@ -367,8 +380,8 @@ function TicketsWidget({ onNavigate }: { onNavigate?: () => void }) {
         </div>
       ) : error ? (
         <p style={{ fontSize: 12, color: 'var(--danger)' }}>{error}</p>
-      ) : tickets.length === 0 ? (
-        <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No internal tickets yet — create one from the Tickets tab or a bug&apos;s detail panel.</p>
+      ) : ysdtOpen.length === 0 ? (
+        <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No open YSDT tickets found.</p>
       ) : (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8, marginBottom: 10 }}>
@@ -379,7 +392,7 @@ function TicketsWidget({ onNavigate }: { onNavigate?: () => void }) {
               </div>
             ))}
           </div>
-          <p style={{ fontSize: 11, color: 'var(--tx-3)' }}>{open} open ticket{open === 1 ? '' : 's'} across the team</p>
+          <p style={{ fontSize: 11, color: 'var(--tx-3)' }}>{open} open YSDT ticket{open === 1 ? '' : 's'} · {tickets.filter(t => (t.jira_key ?? t.ticket_key ?? '').startsWith('YSDT-')).length} total</p>
         </>
       )}
     </Card>

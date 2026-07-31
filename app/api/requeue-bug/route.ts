@@ -21,12 +21,16 @@ export async function PATCH(request: NextRequest) {
   const all = searchParams.get('all') === 'true'
 
   try {
+    // Reset processed_at to epoch zero so n8n's "processed_at < now() - 5min" filter
+    // always matches immediately, even if the row had a future backoff timestamp.
+    const EPOCH_ZERO = '1970-01-01T00:00:00.000Z'
+
     if (all) {
       const thirtyMinsAgo = new Date(Date.now() - 30 * 60_000).toISOString()
       const { data, error } = await supabase
         .from('gemini_queue')
-        .update({ status: 'queued' })
-        .eq('status', 'queued')
+        .update({ status: 'queued', processed_at: EPOCH_ZERO })
+        .in('status', ['queued', 'processing'])   // also recover stuck-in-processing rows
         .lt('created_at', thirtyMinsAgo)
         .select('id')
       if (error) throw error
@@ -36,7 +40,7 @@ export async function PATCH(request: NextRequest) {
     if (id) {
       const { data, error } = await supabase
         .from('gemini_queue')
-        .update({ status: 'queued' })
+        .update({ status: 'queued', processed_at: EPOCH_ZERO })
         .eq('id', id)
         .select('id')
       if (error) throw error

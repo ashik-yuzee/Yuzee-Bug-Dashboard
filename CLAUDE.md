@@ -772,3 +772,50 @@ Plus two more new standalone tabs: **Feedback** (`feedback_reports`) and **Daily
 
 `npx tsc --noEmit` clean, `npx eslint .` clean (0 errors), `npm run build` succeeds. Manually logged in and clicked through all 9 tabs + both sub-nav groups against live data (72 gemini_queue rows, 9 bug_rules, 5 triage_feedback, 102 jira_comment_actions, 13 cw_scan_state, 0 feedback_reports) with no console errors. Confirmed the "Watch Replay" button opens a correctly-formatted URL for a bug with real replay data.
 - **`getField()`** is the canonical way to read any column that may be null in older records but present in `full_data`.
+
+---
+
+## Implementation State (as of 2026-07-31)
+
+### Server Health page — tabbed layout + warning suppression
+
+`components/ServerHealthPage.tsx` was restructured from a single scrolling page into a **5-tab layout** with a **per-warning mute/restore system**.
+
+#### Tabs
+
+| Tab | Badge shows | Content |
+|---|---|---|
+| **Overview** | — | Compact stat chips, issue mini-cards (Failed Checks / Slow Monitors / Open Incidents), Health Signals with mute buttons, compact monitor status table |
+| **Monitors** | count of down/degraded | Full HealthSummary (stats + bullets + attention/reliable lists) + monitor card grid |
+| **Failed Checks** | affected monitor count | FailedChecksSection — collapsible groups by monitor, per-group Mute button |
+| **Performance** | slow monitor count | PerformanceInsightsSection — per-card Mute button, benchmark bars |
+| **Incidents** | open incident count | Paginated (8/page) incident table, all rows clickable, expand shows info/cause/indicators |
+
+Tab badges are red/amber for actionable counts (down monitors, open incidents, failed groups, slow monitors). The tab bar is horizontally scrollable.
+
+#### Warning suppression
+
+- **Suppressible items:** health signal bullets (Overview tab), failed check groups (Checks tab), slow monitor cards (Performance tab).
+- Each shows a **Mute** button. Muting hides the item from its tab and removes it from the Overview mini-card counts.
+- **Suppressed warnings panel** (Overview tab only): a "Suppressed (N)" amber pill button toggles a panel listing every muted item with category, label, and details. Each has a **Restore** button; a **Restore all** button clears all.
+- Suppression is **session-only** (in-memory `Set<string>`, not persisted). Resets on page reload.
+- Suppress key format: `bullet:<buildBullets-key>` | `failchecks:<monitor_id>` | `slow:<monitor_id>`.
+
+#### New types / components added
+
+| Symbol | Location | Notes |
+|---|---|---|
+| `HealthTab` | `ServerHealthPage.tsx` | `'overview' \| 'monitors' \| 'checks' \| 'performance' \| 'incidents'` |
+| `SuppressedItem` | `ServerHealthPage.tsx` | `{ id, category, label, color, details? }` — used to render suppressed panel |
+| `TabBar` | `ServerHealthPage.tsx` | Renders the tab nav with optional badge counts |
+| `SuppressedPanel` | `ServerHealthPage.tsx` | Amber panel listing all suppressed warnings with Restore buttons |
+| `OverviewTab` | `ServerHealthPage.tsx` | Compact compound view: stat chips + issue cards + health signals + monitor table |
+| `BulletPoint.key` | `ServerHealthPage.tsx` | Added stable string key to every bullet so suppress targeting is deterministic |
+
+#### Key conventions
+
+- All timestamps in the Incidents table display in **MYT (Asia/Kuala_Lumpur, UTC+8)**.
+- Failed check query: `checks` table, last 24h, `status != 'up'`, limit 300, grouped client-side by `monitor_id`.
+- Performance thresholds: web endpoints (`name.includes('frontend')`) → 800ms; all others → 200ms.
+- `PerformanceInsightsSection` and `FailedChecksSection` both accept `suppressedIds: Set<string>` + `onSuppress: (id) => void` — pass from `ServerHealthPage` state.
+- `buildBullets()` now returns `BulletPoint[]` with `key` field — do not add bullets without a stable, unique key or suppression will misfire.

@@ -119,6 +119,7 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
     filters.isDuplicate !== 'all' ? '1' : '',
     filters.hasJira !== 'all' ? '1' : '',
     filters.jiraPending !== 'all' ? '1' : '',
+    filters.jiraClosed !== 'open_only' ? '1' : '',
     filters.dateFrom, filters.dateTo,
   ].filter(Boolean).length, [filters])
 
@@ -204,6 +205,10 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
           <DropFilter label="Jira pending" value={filters.jiraPending} active={filters.jiraPending !== 'all'}
             options={[{ value: 'all', label: 'All' }, { value: 'pending_only', label: 'Failed tickets' }]}
             onChange={v => set('jiraPending', v)}
+          />
+          <DropFilter label="Ticket status" value={filters.jiraClosed} active={filters.jiraClosed !== 'open_only'}
+            options={[{ value: 'all', label: 'All' }, { value: 'open_only', label: 'Open tickets only' }, { value: 'closed_only', label: 'Closed tickets' }]}
+            onChange={v => set('jiraClosed', v)}
           />
 
           {/* Date range */}

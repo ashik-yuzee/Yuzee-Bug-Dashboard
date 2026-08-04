@@ -9,10 +9,11 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.1102.0",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.108.2",
-    "@vnedyalk0v/react19-simple-maps": "^2.0.9",
     "@types/recharts": "^1.8.29",
+    "@vnedyalk0v/react19-simple-maps": "^2.0.9",
     "clsx": "^2.1.1",
     "lucide-react": "^1.21.0",
     "next": "16.2.9",

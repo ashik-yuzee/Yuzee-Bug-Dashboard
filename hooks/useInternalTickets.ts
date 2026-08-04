@@ -13,7 +13,7 @@ async function fetchTickets(): Promise<{ tickets: InternalTicket[]; error: strin
         .from('internal_tickets')
         .select('*')
         .order('created_at', { ascending: false })
-        .limit(500)
+        .limit(2000)
       if (res.error) throw res.error
       return res
     }, { maxRetries: 2, baseDelayMs: 700 })

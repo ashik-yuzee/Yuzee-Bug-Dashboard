@@ -59,8 +59,8 @@ export async function GET() {
 
   try {
     const [yscRes, ysdtRes] = await Promise.all([
-      searchJiraJql(`project = ${SPACE_YSC} AND labels = "auto-bug" ORDER BY created DESC`, FIELDS, 50),
-      searchJiraJql(`project = ${SPACE_YSDT} ORDER BY created DESC`, FIELDS, 50),
+      searchJiraJql(`project = ${SPACE_YSC} ORDER BY created DESC`, FIELDS, 100),
+      searchJiraJql(`project = ${SPACE_YSDT} ORDER BY created DESC`, FIELDS, 100),
     ])
 
     return NextResponse.json({

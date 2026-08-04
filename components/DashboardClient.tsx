@@ -314,7 +314,7 @@ export type Filters = {
   search: string; severity: string[]; status: string[]; category: string[]
   platform: string[]; source: string[]; component: string[]; errorType: string[]
   environment: string[]; module: string[]; isDuplicate: string; dateFrom: string; dateTo: string
-  hasJira: string; jiraPending: string
+  hasJira: string; jiraPending: string; jiraClosed: string
 }
 
 export type SortConfig = { key: keyof BugReport; dir: 'asc' | 'desc' }
@@ -326,7 +326,8 @@ export type TicketsSubTab = 'board' | 'list'
 export const BLANK_FILTERS: Filters = {
   search: '', severity: [], status: [], category: [], platform: [],
   source: [], component: [], errorType: [], environment: [], module: [],
-  isDuplicate: 'all', dateFrom: '', dateTo: '', hasJira: 'all', jiraPending: 'all',
+  isDuplicate: 'no', dateFrom: '', dateTo: '', hasJira: 'all', jiraPending: 'all',
+  jiraClosed: 'open_only',
 }
 
 interface AdminUser { email: string }
@@ -527,8 +528,15 @@ export default function DashboardClient({ user, initialBugs }: Props) {
   const stats = useMemo(() => computeStats(parsedBugs), [parsedBugs])
 
   const jiraPendingCount = useMemo(() => parsedBugs.filter(b => b.jira_pending === true).length, [parsedBugs])
+
+  // Set of jira_keys whose internal_tickets entry is status='done' (closed in Jira).
+  // Bugs linked to a closed ticket are hidden by default (jiraClosed='open_only').
+  const closedJiraKeys = useMemo(
+    () => new Set(tickets.filter(t => t.status === 'done').map(t => t.ticket_key)),
+    [tickets]
+  )
   const stuckCount = queueStats.stuckItems.length
-  const openTicketCount = useMemo(() => tickets.filter(t => t.status !== 'done').length, [tickets])
+  const openTicketCount = useMemo(() => tickets.filter(t => t.ticket_key.startsWith('YSDT-') && t.status !== 'done').length, [tickets])
 
   const handleOpenBugFromTicket = useCallback((reportId: string) => {
     const bug = parsedBugs.find(b => b.report_id === reportId)
@@ -542,7 +550,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     let r = [...parsedBugs]
     const { search, severity, status, category, platform, source,
             component, errorType, environment, module, isDuplicate,
-            dateFrom, dateTo, hasJira, jiraPending } = filters
+            dateFrom, dateTo, hasJira, jiraPending, jiraClosed } = filters
 
     if (search) {
       const q = search.toLowerCase()
@@ -573,6 +581,9 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     if (hasJira === 'no')      r = r.filter(b => !b.jira_key)
     if (jiraPending === 'yes') r = r.filter(b => b.jira_pending === true)
     if (jiraPending === 'no')  r = r.filter(b => !b.jira_pending)
+    // open_only: hide bugs whose linked ticket is done; closed_only: show only those
+    if (jiraClosed === 'open_only')   r = r.filter(b => !b.jira_key || !closedJiraKeys.has(b.jira_key))
+    if (jiraClosed === 'closed_only') r = r.filter(b => !!b.jira_key && closedJiraKeys.has(b.jira_key))
 
     r.sort((a, b) => {
       const av = String(a[sort.key as keyof typeof a] ?? '')
@@ -605,10 +616,11 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     ...filters.severity, ...filters.status, ...filters.category,
     ...filters.platform, ...filters.source, ...filters.component,
     ...filters.errorType, ...filters.environment, ...filters.module,
-    filters.isDuplicate !== 'all' ? '1' : '',
+    filters.isDuplicate !== 'no' ? '1' : '',
     filters.dateFrom, filters.dateTo,
     filters.hasJira !== 'all' ? '1' : '',
     filters.jiraPending !== 'all' ? '1' : '',
+    filters.jiraClosed !== 'open_only' ? '1' : '',
   ].filter(Boolean).length, [filters])
 
   const navigateToBugs = useCallback((f: Record<string, string | string[]>) => {
@@ -618,7 +630,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { id: 'overview',  label: 'Overview',       icon: <BarChart3     size={14} aria-hidden /> },
-    { id: 'bugs',      label: 'Bug Reports',    icon: <List          size={14} aria-hidden />, badge: visibleBugs.length },
+    { id: 'bugs',      label: 'Bug Reports',    icon: <List          size={14} aria-hidden />, badge: parsedBugs.filter(b => !b.is_duplicate).length },
     { id: 'clusters',  label: 'Error Clusters',  icon: <Layers       size={14} aria-hidden />, badge: stats.errorClusters.length },
     { id: 'pipeline',  label: 'Pipeline',        icon: <Activity     size={14} aria-hidden />, badge: stuckCount > 0 ? stuckCount : undefined },
     { id: 'triage',    label: 'Triage & Rules',  icon: <ShieldCheck   size={14} aria-hidden /> },

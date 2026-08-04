@@ -1,9 +1,9 @@
 'use client'
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { AlertTriangle, RefreshCw, Shield, X } from 'lucide-react'
-import { ResponsiveContainer, LineChart, Line } from 'recharts'
+import { ResponsiveContainer, LineChart, Line, Tooltip } from 'recharts'
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -47,6 +47,9 @@ interface CheckRow {
   status: 'up' | 'down' | 'degraded'
   response_time_ms: number | null
   checked_at: string
+  error_class: string | null
+  error_message: string | null
+  status_code: number | null
 }
 
 interface IncidentRow {
@@ -77,6 +80,24 @@ interface FailedCheckRow {
 }
 
 type ChecksByMonitor = Record<string, CheckRow[]>
+
+interface AnomalyRow {
+  id: string
+  monitor_id: string
+  monitor_name: string
+  monitor_target: string
+  checked_at: string
+  anomaly_type: 'spike' | 'down' | 'degraded'
+  response_time_ms: number | null
+  avg_ms: number | null
+  spike_ratio: number | null
+  error_class: string | null
+  error_message: string | null
+  status_code: number | null
+  ai_analysis: string | null
+  cloudwatch_url: string | null
+  created_at: string
+}
 
 // ─── Colour constants (real hex — never CSS vars — so rgba alpha works) ──────
 
@@ -117,6 +138,34 @@ function relativeTime(iso: string | null): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`
+}
+
+// ─── MYT / Maintenance helpers ────────────────────────────────
+// MYT = Asia/Kuala_Lumpur = UTC+8. Maintenance window: 00:00–09:00 MYT daily.
+
+function getMYTHour(iso: string): number {
+  return new Date(new Date(iso).getTime() + 8 * 3_600_000).getUTCHours()
+}
+
+function isMaintenancePeriod(iso: string): boolean {
+  const h = getMYTHour(iso)
+  return h >= 0 && h < 9
+}
+
+function isMYTMaintenanceNow(): boolean {
+  return isMaintenancePeriod(new Date().toISOString())
+}
+
+function todayMYT(): string {
+  return new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10)
+}
+
+function formatMYT(iso: string | null): string {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleString('en-MY', {
+    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+    timeZone: 'Asia/Kuala_Lumpur',
+  }) + ' MYT'
 }
 
 // ─── Performance benchmarks (HTTP Archive 2024 + Google Core Web Vitals) ──────
@@ -245,16 +294,100 @@ function incidentDurationStr(inc: IncidentRow): string {
   return '—'
 }
 
+// ─── CloudWatch spike link ────────────────────────────────────
+
+function deriveLogGroup(target: string): string | null {
+  const t = target.toLowerCase()
+  if (t.includes('/courses'))       return '/aws/yuzee/course-service'
+  if (t.includes('/institutes'))    return '/aws/yuzee/institute-service'
+  if (t.includes('/search'))        return '/aws/yuzee/search-service'
+  if (t.includes('/payment'))       return '/aws/yuzee/payment-service'
+  if (t.includes('yuzee'))          return '/aws/yuzee/user-service'
+  return null
+}
+
+function buildSpikeCloudWatchUrl(target: string, checkedAt: string, statusCode: number | null): string | null {
+  const logGroup = deriveLogGroup(target)
+  if (!logGroup) return null
+
+  const ts    = new Date(checkedAt).getTime()
+  const start = ts - 2 * 60_000
+  const end   = ts + 2 * 60_000
+  const filter = statusCode ? `"${statusCode}"` : ''
+  const encoded = encodeURIComponent(logGroup)
+  const filterPart = filter ? `filterPattern=${encodeURIComponent(filter)}&` : ''
+  return `https://console.aws.amazon.com/cloudwatch/home?region=ap-southeast-1`
+    + `#logsV2:log-groups/log-group/${encoded}`
+    + `/log-events?${filterPart}start=${start}&end=${end}`
+}
+
 // ─── Sparkline ────────────────────────────────────────────────
 
-interface SparkDatum { ms: number; status: string }
-interface DotProps   { cx?: number; cy?: number; payload?: SparkDatum }
+function spikeSeverityColor(ms: number, avg: number): string {
+  const ratio = avg > 0 ? ms / avg : 1
+  if (ratio >= 6) return C.danger    // red: 6× avg+
+  if (ratio >= 3) return '#f97316'   // orange: 3–6× avg
+  return C.warning                   // amber: 2–3× avg
+}
+
+interface SparkDatum {
+  ms: number; rawMs: number | null; status: string; checked_at?: string
+  isSpike: boolean; spikeColor: string
+  errorClass?: string | null; errorMsg?: string | null; statusCode?: number | null
+}
+interface DotProps { cx?: number; cy?: number; payload?: SparkDatum; index?: number }
 
 function SparkDot(props: DotProps) {
   const { cx, cy, payload } = props
   if (cx == null || cy == null) return <g />
   const fill = payload?.status === 'down' ? C.danger : payload?.status === 'degraded' ? C.warning : C.success
   return <circle cx={cx} cy={cy} r={2} fill={fill} strokeWidth={0} />
+}
+
+function SpikeMarker({ cx, cy, color = C.warning }: { cx?: number; cy?: number; color?: string }) {
+  if (cx == null || cy == null) return <g />
+  const h = 7, w = 9
+  return (
+    <polygon
+      points={`${cx},${cy - h - 3} ${cx - w / 2},${cy - 3} ${cx + w / 2},${cy - 3}`}
+      fill={color} opacity={0.9}
+    />
+  )
+}
+
+function SparkTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: SparkDatum }> }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0].payload
+  const color = d.status === 'down' ? C.danger : d.status === 'degraded' ? C.warning : d.isSpike ? d.spikeColor : C.success
+  const msText = d.rawMs === null ? 'Timeout' : `${d.rawMs}ms`
+  const time = d.checked_at
+    ? new Date(d.checked_at).toLocaleString('en-MY', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })
+    : ''
+  return (
+    <div style={{
+      background: 'var(--surface-3)', border: '1px solid var(--border)',
+      borderRadius: 6, padding: '6px 10px', fontSize: 11,
+      boxShadow: '0 2px 8px rgba(0,0,0,.3)', pointerEvents: 'none',
+      display: 'flex', flexDirection: 'column', gap: 3, maxWidth: 240,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ fontWeight: 700, color }}>{msText}</span>
+        {d.isSpike && (
+          <span style={{ fontSize: 10, fontWeight: 700, color: d.spikeColor, background: d.spikeColor + '18', border: `1px solid ${d.spikeColor}50`, borderRadius: 4, padding: '1px 5px' }}>
+            ⚡ Spike
+          </span>
+        )}
+      </div>
+      {d.statusCode != null && <div style={{ color: 'var(--tx-3)' }}>HTTP {d.statusCode}</div>}
+      {d.errorClass && <div style={{ color: 'var(--tx-2)', fontFamily: 'monospace', fontSize: 10 }}>{d.errorClass}</div>}
+      {d.errorMsg && (
+        <div style={{ color: 'var(--tx-3)', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
+          {d.errorMsg}
+        </div>
+      )}
+      {time && <div style={{ color: 'var(--tx-3)', marginTop: 1 }}>{time} MYT</div>}
+    </div>
+  )
 }
 
 function Sparkline({ checks }: { checks: CheckRow[] }) {
@@ -265,17 +398,59 @@ function Sparkline({ checks }: { checks: CheckRow[] }) {
       </div>
     )
   }
-  const data: SparkDatum[] = checks.map(c => ({ ms: c.response_time_ms ?? 0, status: c.status }))
+  const nonZero = checks.filter(c => c.response_time_ms !== null && c.response_time_ms > 0)
+  const avgMs = nonZero.length > 0 ? nonZero.reduce((s, c) => s + c.response_time_ms!, 0) / nonZero.length : 0
+  const spikeThreshold = avgMs * 2
+
+  const data: SparkDatum[] = checks.map(c => {
+    const spike = avgMs > 0 && c.response_time_ms !== null && c.response_time_ms >= spikeThreshold
+    return {
+      ms: c.response_time_ms ?? 0,
+      rawMs: c.response_time_ms,
+      status: c.status,
+      checked_at: c.checked_at,
+      isSpike: spike,
+      spikeColor: spike ? spikeSeverityColor(c.response_time_ms!, avgMs) : C.warning,
+      errorClass: c.error_class,
+      errorMsg: c.error_message,
+      statusCode: c.status_code,
+    }
+  })
+
   return (
     <ResponsiveContainer width="100%" height={60}>
-      <LineChart data={data} margin={{ top: 4, right: 2, left: 2, bottom: 4 }}>
+      <LineChart data={data} margin={{ top: 14, right: 2, left: 2, bottom: 4 }}>
+        <Tooltip
+          content={<SparkTooltip />}
+          cursor={{ stroke: 'var(--border)', strokeWidth: 1, strokeDasharray: '3 3' }}
+        />
         <Line
           type="monotone"
           dataKey="ms"
           stroke="var(--border-hi)"
           strokeWidth={1.5}
-          dot={(props) => <SparkDot {...(props as DotProps)} />}
-          activeDot={false}
+          dot={(dotProps) => {
+            const p = dotProps as DotProps
+            const d = p.index !== undefined ? data[p.index] : undefined
+            if (d?.isSpike) {
+              return (
+                <g key={`d-${p.index}`}>
+                  <SparkDot {...p} />
+                  <SpikeMarker cx={p.cx} cy={p.cy} color={d.spikeColor} />
+                </g>
+              )
+            }
+            return <SparkDot {...p} />
+          }}
+          activeDot={(dotProps: DotProps) => {
+            const { cx, cy, payload } = dotProps
+            if (cx == null || cy == null) return <g />
+            const fill = payload?.status === 'down' ? C.danger
+              : payload?.status === 'degraded' ? C.warning
+              : payload?.isSpike ? payload.spikeColor
+              : C.success
+            return <circle cx={cx} cy={cy} r={4} fill={fill} stroke="var(--surface-1)" strokeWidth={1.5} />
+          }}
           isAnimationActive={false}
         />
       </LineChart>
@@ -300,10 +475,12 @@ function UptimeChip({ label, value }: { label: string; value: number | null }) {
 
 // ─── Monitor Card ─────────────────────────────────────────────
 
-function MonitorCard({ monitor, checks, onClick }: {
+function MonitorCard({ monitor, checks, onClick, sparklineLabel, isLoading }: {
   monitor: MonitorRow
   checks: CheckRow[]
   onClick: () => void
+  sparklineLabel?: string
+  isLoading?: boolean
 }) {
   const info = statusInfo(monitor)
   const hasActiveIncident = monitor.active_incident_id !== null && monitor.incident_started_at !== null
@@ -375,7 +552,18 @@ function MonitorCard({ monitor, checks, onClick }: {
       </div>
 
       {/* Sparkline */}
-      <Sparkline checks={checks} />
+      <div>
+        {sparklineLabel && (
+          <div style={{ fontSize: 9, color: 'var(--tx-3)', textAlign: 'right', marginBottom: 2, letterSpacing: '.04em' }}>
+            {sparklineLabel}
+          </div>
+        )}
+        {isLoading ? (
+          <div className="skeleton" style={{ height: 60, borderRadius: 'var(--r-sm)' }} />
+        ) : (
+          <Sparkline checks={checks} />
+        )}
+      </div>
 
       {/* Active incident banner */}
       {hasActiveIncident && (
@@ -456,8 +644,7 @@ function computeMetrics(monitors: MonitorRow[], incidents: IncidentRow[]): Summa
     ? Math.round(healthy.reduce((s, m) => s + (m.avg_response_24h ?? 0), 0) / healthy.length)
     : null
 
-  const now = Date.now()
-  const incidents7d    = incidents.filter(i => new Date(i.started_at).getTime() > now - 7 * 86_400_000)
+  const incidents7d    = incidents  // already filtered to the selected time range by fetchAll
   const openIncidents  = incidents.filter(i => i.is_open)
   const closed         = incidents.filter(i => !i.is_open && i.duration_seconds !== null)
   const avgResolutionSec = closed.length > 0
@@ -504,16 +691,16 @@ function buildBullets(m: SummaryMetrics): BulletPoint[] {
 
   const perfect = m.enabled.filter(mon => (mon.uptime_7d ?? 0) >= 99.9 && mon.status !== 'down')
   if (perfect.length > 0) {
-    bullets.push({ icon: '✓', text: `${perfect.map(mon => mon.name).join(', ')} — 100% uptime this week`, color: C.success, key: `perfect:${perfect.map(p => p.id).join(',')}` })
+    bullets.push({ icon: '✓', text: `${perfect.map(mon => mon.name).join(', ')} — 100% uptime (7d avg)`, color: C.success, key: `perfect:${perfect.map(p => p.id).join(',')}` })
   }
 
   const inc7d = m.incidents7d.length
   if (inc7d === 0) {
-    bullets.push({ icon: '✓', text: 'No incidents in the last 7 days', color: C.success, key: 'no-incidents-7d' })
+    bullets.push({ icon: '✓', text: 'No incidents in the selected period', color: C.success, key: 'no-incidents-7d' })
   } else if (m.openIncidents.length > 0) {
-    bullets.push({ icon: '✕', text: `${inc7d} incident${inc7d !== 1 ? 's' : ''} this week — ${m.openIncidents.length} still open`, color: C.danger, key: `open-incidents:${m.openIncidents.map(i => i.id).join(',')}` })
+    bullets.push({ icon: '✕', text: `${inc7d} incident${inc7d !== 1 ? 's' : ''} — ${m.openIncidents.length} still open`, color: C.danger, key: `open-incidents:${m.openIncidents.map(i => i.id).join(',')}` })
   } else {
-    bullets.push({ icon: '✓', text: `${inc7d} incident${inc7d !== 1 ? 's' : ''} this week — all resolved${m.avgResolutionSec !== null ? ` (avg ${formatDuration(Math.round(m.avgResolutionSec))})` : ''}`, color: C.success, key: `resolved-${inc7d}` })
+    bullets.push({ icon: '✓', text: `${inc7d} incident${inc7d !== 1 ? 's' : ''} — all resolved${m.avgResolutionSec !== null ? ` (avg ${formatDuration(Math.round(m.avgResolutionSec))})` : ''}`, color: C.success, key: `resolved-${inc7d}` })
   }
 
   return bullets
@@ -660,12 +847,19 @@ function MonitorHealthRow({ monitor, type }: { monitor: MonitorRow; type: 'troub
   )
 }
 
-function HealthSummary({ monitors, incidents }: { monitors: MonitorRow[]; incidents: IncidentRow[] }) {
+function HealthSummary({ monitors, incidents, timeRange }: { monitors: MonitorRow[]; incidents: IncidentRow[]; timeRange: TimeRange }) {
   const m = computeMetrics(monitors, incidents)
 
   if (monitors.length === 0) return null
 
-  const score   = m.avgUptime7d
+  const uptimeField: keyof MonitorRow =
+    timeRange === 'today' ? 'uptime_24h' : timeRange === '7d' ? 'uptime_7d' : 'uptime_30d'
+  const uptimePeriodLabel =
+    timeRange === 'today' ? '24h' : timeRange === '7d' ? '7d' : '30d'
+  const withUptime = m.enabled.filter(mon => mon[uptimeField] !== null)
+  const score = withUptime.length > 0
+    ? withUptime.reduce((s, mon) => s + ((mon[uptimeField] as number) ?? 0), 0) / withUptime.length
+    : null
   const sColor  = score !== null ? scoreColor(score) : C.muted
   const sLabel  = score !== null ? scoreLabel(score) : 'Unknown'
   const bullets = buildBullets(m)
@@ -699,7 +893,7 @@ function HealthSummary({ monitors, incidents }: { monitors: MonitorRow[]; incide
         {/* Stat chips */}
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           <StatChip
-            label="7-day avg uptime"
+            label={`${uptimePeriodLabel} avg uptime`}
             value={score !== null ? `${score.toFixed(1)}%` : '—'}
             color={sColor}
             sub={sLabel}
@@ -711,10 +905,10 @@ function HealthSummary({ monitors, incidents }: { monitors: MonitorRow[]; incide
             sub={statusSummary}
           />
           <StatChip
-            label="Incidents (7d)"
+            label={`Incidents (${uptimePeriodLabel})`}
             value={String(m.incidents7d.length)}
             color={m.openIncidents.length > 0 ? C.danger : m.incidents7d.length > 0 ? C.warning : C.success}
-            sub={m.openIncidents.length > 0 ? `${m.openIncidents.length} open` : m.incidents7d.length === 0 ? 'None this week' : 'All resolved'}
+            sub={m.openIncidents.length > 0 ? `${m.openIncidents.length} open` : m.incidents7d.length === 0 ? 'None recorded' : 'All resolved'}
           />
           <StatChip
             label="Avg response"
@@ -748,32 +942,13 @@ function HealthSummary({ monitors, incidents }: { monitors: MonitorRow[]; incide
           ))}
         </div>
 
-        {/* Needs Attention + Reliable split */}
-        {(m.troubled.length > 0 || m.reliable.length > 0) && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: C.warning, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 10 }}>
-                ⚠ Needs Attention
-              </div>
-              {m.troubled.length === 0 ? (
-                <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>All monitors healthy.</p>
-              ) : (
-                m.troubled.map(mon => <MonitorHealthRow key={mon.id} monitor={mon} type="troubled" />)
-              )}
+        {/* Needs Attention */}
+        {m.troubled.length > 0 && (
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.warning, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
+              ⚠ Needs Attention
             </div>
-
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: C.success, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 10 }}>
-                ✓ Reliable
-              </div>
-              {m.reliable.length === 0 ? (
-                <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No monitors at 99 %+ yet.</p>
-              ) : (
-                m.reliable.map(mon => <MonitorHealthRow key={mon.id} monitor={mon} type="reliable" />)
-              )}
-            </div>
-
+            {m.troubled.map(mon => <MonitorHealthRow key={mon.id} monitor={mon} type="troubled" />)}
           </div>
         )}
 
@@ -784,11 +959,10 @@ function HealthSummary({ monitors, incidents }: { monitors: MonitorRow[]; incide
 
 // ─── Failed Checks Section ────────────────────────────────────
 
-function FailedChecksSection({ monitors, failedChecks, suppressedIds, onSuppress }: {
+function FailedChecksSection({ monitors, failedChecks, windowLabel }: {
   monitors: MonitorRow[]
   failedChecks: FailedCheckRow[]
-  suppressedIds: Set<string>
-  onSuppress: (id: string) => void
+  windowLabel: string
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
@@ -808,13 +982,11 @@ function FailedChecksSection({ monitors, failedChecks, suppressedIds, onSuppress
   }, [failedChecks])
 
   const monitorIds = Object.keys(byMonitor)
-  const visibleIds = monitorIds.filter(id => !suppressedIds.has(`failchecks:${id}`))
-  const suppressedCount = monitorIds.length - visibleIds.length
   if (monitorIds.length === 0) return null
 
   const toggle = (id: string) => setExpanded(prev => {
     const next = new Set(prev)
-    next.has(id) ? next.delete(id) : next.add(id)
+    if (next.has(id)) { next.delete(id) } else { next.add(id) }
     return next
   })
 
@@ -825,23 +997,14 @@ function FailedChecksSection({ monitors, failedChecks, suppressedIds, onSuppress
         <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: C.dangerBg, color: C.danger, borderWidth: 1, borderStyle: 'solid', borderColor: C.dangerBorder }}>
           {failedChecks.length} failures · {monitorIds.length} monitor{monitorIds.length !== 1 ? 's' : ''}
         </span>
-        {suppressedCount > 0 && (
-          <span style={{ fontSize: 11, color: C.warning, fontWeight: 600 }}>{suppressedCount} suppressed</span>
-        )}
-        <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>Last 24h — click a row to expand</span>
+        <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>{windowLabel} — click a row to expand</span>
       </div>
 
-      {visibleIds.length === 0 && (
-        <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 13, fontStyle: 'italic' }}>
-          All failed check groups are suppressed. Restore them from the Overview tab.
-        </div>
-      )}
-
-      {visibleIds.map((monId, mIdx) => {
+      {monitorIds.map((monId, mIdx) => {
         const name = nameMap[monId] ?? monId
         const checks = byMonitor[monId]
         const isOpen = expanded.has(monId)
-        const isLast = mIdx === visibleIds.length - 1
+        const isLast = mIdx === monitorIds.length - 1
 
         const errorCounts: Record<string, number> = {}
         for (const c of checks) { const k = c.error_class ?? 'unknown'; errorCounts[k] = (errorCounts[k] ?? 0) + 1 }
@@ -862,11 +1025,8 @@ function FailedChecksSection({ monitors, failedChecks, suppressedIds, onSuppress
                   ))}
                 </div>
                 <span style={{ fontSize: 11, color: 'var(--tx-3)', flexShrink: 0 }}>
-                  Last: {new Date(checks[0].checked_at).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  Last: {formatMYT(checks[0].checked_at)}
                 </span>
-              </button>
-              <button onClick={() => onSuppress(`failchecks:${monId}`)} title="Suppress this group" style={{ padding: '12px 16px', background: 'none', cursor: 'pointer', fontSize: 11, color: 'var(--tx-3)', flexShrink: 0, borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: 'var(--border)' }}>
-                Mute
               </button>
             </div>
 
@@ -921,34 +1081,19 @@ function FailedChecksSection({ monitors, failedChecks, suppressedIds, onSuppress
 
 // ─── Performance Insights Section ─────────────────────────────
 
-function PerformanceInsightsSection({ monitors, suppressedIds, onSuppress }: {
-  monitors: MonitorRow[]
-  suppressedIds: Set<string>
-  onSuppress: (id: string) => void
-}) {
-  const allSlow = monitors.filter(m => {
+function PerformanceInsightsSection({ monitors }: { monitors: MonitorRow[] }) {
+  const slow = monitors.filter(m => {
     if (!m.avg_response_24h || !m.enabled) return false
-    const threshold = isWebEndpoint(m.name) ? 800 : 200
-    return m.avg_response_24h >= threshold
+    return m.avg_response_24h >= (isWebEndpoint(m.name) ? 800 : 200)
   })
-  const slow = allSlow.filter(m => !suppressedIds.has(`slow:${m.id}`))
-  const suppressedCount = allSlow.length - slow.length
-  if (allSlow.length === 0) return null
+  if (slow.length === 0) return null
 
   return (
     <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden', marginBottom: 24 }}>
       <div style={{ padding: '14px 20px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
         <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--tx-1)', margin: 0 }}>Performance Insights</h2>
-        <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{allSlow.length} monitor{allSlow.length !== 1 ? 's' : ''} above response benchmark</span>
-        {suppressedCount > 0 && (
-          <span style={{ fontSize: 11, color: C.warning, fontWeight: 600 }}>{suppressedCount} suppressed</span>
-        )}
+        <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{slow.length} monitor{slow.length !== 1 ? 's' : ''} above response benchmark</span>
       </div>
-      {slow.length === 0 && (
-        <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 13, fontStyle: 'italic' }}>
-          All slow monitor warnings are suppressed. Restore them from the Overview tab.
-        </div>
-      )}
       <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
         {slow.map(m => {
           const avg  = Math.round(m.avg_response_24h ?? 0)
@@ -972,9 +1117,6 @@ function PerformanceInsightsSection({ monitors, suppressedIds, onSuppress }: {
                 <span style={{ fontSize: 12, color: 'var(--tx-3)' }}>
                   Avg {avg}ms{p95 !== null ? ` · P95 ${p95}ms` : ''}
                 </span>
-                <button onClick={() => onSuppress(`slow:${m.id}`)} title="Suppress this warning" style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 600, padding: '2px 10px', borderRadius: 'var(--r-sm)', background: 'var(--surface-1)', color: 'var(--tx-3)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', cursor: 'pointer' }}>
-                  Mute
-                </button>
               </div>
 
               {/* Response bar */}
@@ -1017,21 +1159,86 @@ function PerformanceInsightsSection({ monitors, suppressedIds, onSuppress }: {
 
 // ─── Monitor Detail Panel ─────────────────────────────────────
 
-function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose }: {
+function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose, initialChecks }: {
   monitor: MonitorRow
   incidents: IncidentRow[]
   monitorNames: Record<string, string>
   onClose: () => void
+  initialChecks: CheckRow[]
 }) {
+  const supabase = useMemo(() => createClient(), [])
   const info = statusInfo(monitor)
   const monitorIncidents = incidents.filter(i => i.monitor_id === monitor.id)
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+  const [checkRange, setCheckRange] = useState<CheckRange>('1h')
+  const [panelChecks, setPanelChecks] = useState<CheckRow[]>(initialChecks)
+  const [loadingChecks, setLoadingChecks] = useState(false)
+  const [expandedLogKey, setExpandedLogKey] = useState<string | null>(null)
+  const [logCache, setLogCache] = useState<Record<string, {
+    events: { timestamp: number | null; message: string }[]
+    analysis: string | null
+    loading: boolean
+    error: string | null
+  }>>({})
+  const fetchedLogKeys = useRef<Set<string>>(new Set())
+
+  const fetchCheckLogs = async (checked_at: string, status_code: number | null) => {
+    const logGroup = deriveLogGroup(monitor.target)
+    if (!logGroup) return
+    const key = checked_at
+    if (fetchedLogKeys.current.has(key)) return
+    fetchedLogKeys.current.add(key)
+    setLogCache(prev => ({ ...prev, [key]: { events: [], analysis: null, loading: true, error: null } }))
+    const ts = new Date(checked_at).getTime()
+    const params = new URLSearchParams({
+      logGroup,
+      start: String(ts - 2 * 60_000),
+      end: String(ts + 2 * 60_000),
+      monitorId: monitor.id,
+      checkedAt: checked_at,
+    })
+    if (status_code) params.set('filter', String(status_code))
+    try {
+      const res = await fetch(`/api/cloudwatch-logs?${params}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed')
+      setLogCache(prev => ({ ...prev, [key]: { events: data.events, analysis: data.analysis, loading: false, error: null } }))
+    } catch (err: unknown) {
+      fetchedLogKeys.current.delete(key)
+      const msg = err instanceof Error ? err.message : 'Failed to load logs'
+      setLogCache(prev => ({ ...prev, [key]: { events: [], analysis: null, loading: false, error: msg } }))
+    }
+  }
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
   }, [onClose])
+
+  useEffect(() => {
+    const opt = CHECK_RANGE_OPTS.find(o => o.id === checkRange)
+    if (!opt) return
+    setLoadingChecks(true)
+    const since = new Date(Date.now() - opt.minutes * 60_000).toISOString()
+    supabase
+      .from('checks')
+      .select('monitor_id, status, response_time_ms, checked_at, error_class, error_message, status_code')
+      .eq('monitor_id', monitor.id)
+      .gte('checked_at', since)
+      .order('checked_at', { ascending: true })
+      .limit(500)
+      .then(({ data, error }) => {
+        if (!error && data) setPanelChecks((data as CheckRow[]).filter(c => !isMaintenancePeriod(c.checked_at)))
+        setLoadingChecks(false)
+      })
+  }, [checkRange, monitor.id, supabase])
+
+  const toggleIndicators = (id: string) => setExpandedIds(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
 
   return (
     <>
@@ -1090,6 +1297,180 @@ function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose }: {
               </div>
             ))}
           </div>
+
+          {/* Response time chart + range selector */}
+          <div style={{ background: 'var(--surface-2)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-md)', padding: '12px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--tx-2)' }}>
+                Response times{loadingChecks ? ' …' : ` (${panelChecks.length} checks, excl. maintenance)`}
+              </span>
+              <div style={{ display: 'flex', gap: 2, background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: 2 }}>
+                {CHECK_RANGE_OPTS.map(opt => (
+                  <button key={opt.id} onClick={() => setCheckRange(opt.id)} style={{
+                    fontSize: 11, fontWeight: checkRange === opt.id ? 700 : 400,
+                    padding: '3px 9px', borderRadius: 'var(--r-sm)', border: 'none', cursor: 'pointer',
+                    background: checkRange === opt.id ? 'var(--orange-dim)' : 'transparent',
+                    color: checkRange === opt.id ? 'var(--orange)' : 'var(--tx-3)',
+                    whiteSpace: 'nowrap', transition: 'all .12s',
+                  }}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {loadingChecks ? (
+              <div className="skeleton" style={{ height: 60, borderRadius: 'var(--r-sm)' }} />
+            ) : (
+              <Sparkline checks={panelChecks} />
+            )}
+          </div>
+
+          {/* Anomalous checks timeline */}
+          {(() => {
+            if (loadingChecks) return null
+            const nonZero = panelChecks.filter(c => c.response_time_ms !== null && c.response_time_ms > 0)
+            const avg = nonZero.length ? nonZero.reduce((s, c) => s + c.response_time_ms!, 0) / nonZero.length : 0
+            const anomalous = panelChecks
+              .filter(c => c.status !== 'up' || (avg > 0 && (c.response_time_ms ?? 0) >= avg * 2))
+              .slice()
+              .reverse()
+            if (anomalous.length === 0) return null
+            return (
+              <div style={{ background: 'var(--surface-2)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-md)', overflow: 'hidden' }}>
+                <div style={{ padding: '9px 14px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx-1)' }}>Anomalous Checks</span>
+                  <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, background: C.dangerBg, color: C.danger, fontWeight: 700, border: `1px solid ${C.dangerBorder}` }}>
+                    {anomalous.length}
+                  </span>
+                  <span style={{ fontSize: 10, color: 'var(--tx-3)', marginLeft: 'auto' }}>
+                    {avg > 0 ? `avg ${Math.round(avg)}ms · ⚡ = ≥${Math.round(avg * 2)}ms` : 'failures only'}
+                  </span>
+                </div>
+                <div>
+                  {anomalous.slice(0, 60).map((c, i) => {
+                    const isDown  = c.status === 'down'
+                    const isDeg   = c.status === 'degraded'
+                    const isSpike = avg > 0 && c.status === 'up' && (c.response_time_ms ?? 0) >= avg * 2
+                    const dotColor = isDown ? C.danger : isDeg ? C.warning : isSpike ? spikeSeverityColor(c.response_time_ms ?? 0, avg) : C.warning
+                    const time = new Date(c.checked_at).toLocaleString('en-MY', {
+                      hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Kuala_Lumpur',
+                    })
+                    const hasLogs    = !!deriveLogGroup(monitor.target)
+                    const logKey     = c.checked_at
+                    const isLogOpen  = expandedLogKey === logKey
+                    const logData    = logCache[logKey]
+                    const isLastItem = i === anomalous.slice(0, 60).length - 1
+                    return (
+                      <div key={i} style={{
+                        borderBottomWidth: isLastItem && !isLogOpen ? 0 : 1,
+                        borderBottomStyle: 'solid', borderBottomColor: 'var(--border)',
+                      }}>
+                        {/* Check row */}
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '7px 14px' }}>
+                          <span style={{ fontSize: 9, color: dotColor, fontWeight: 700, flexShrink: 0, marginTop: 2 }}>
+                            {isSpike ? '⚡' : isDown ? '✕' : '⚠'}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: c.error_class || c.error_message ? 3 : 0 }}>
+                              <span style={{ fontSize: 11, fontWeight: 700, color: dotColor, flexShrink: 0 }}>
+                                {c.response_time_ms !== null ? `${c.response_time_ms}ms` : 'Timeout'}
+                              </span>
+                              {c.status_code != null && (
+                                <span style={{ fontSize: 10, color: 'var(--tx-3)', flexShrink: 0 }}>HTTP {c.status_code}</span>
+                              )}
+                              {isSpike && (
+                                <span style={{ fontSize: 10, color: dotColor, fontWeight: 600, flexShrink: 0 }}>spike</span>
+                              )}
+                              <span style={{ fontSize: 10, color: 'var(--tx-3)', marginLeft: 'auto', flexShrink: 0 }}>{time} MYT</span>
+                            </div>
+                            {c.error_class && (
+                              <div style={{ fontSize: 10, color: 'var(--tx-2)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {c.error_class}
+                              </div>
+                            )}
+                            {c.error_message && (
+                              <div style={{ fontSize: 10, color: 'var(--tx-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {c.error_message}
+                              </div>
+                            )}
+                            {hasLogs && (
+                              <button
+                                onClick={() => {
+                                  const wasOpen = expandedLogKey === logKey
+                                  setExpandedLogKey(wasOpen ? null : logKey)
+                                  if (!wasOpen) fetchCheckLogs(c.checked_at, c.status_code)
+                                }}
+                                style={{
+                                  marginTop: 4, fontSize: 10, fontWeight: 600, padding: '2px 8px',
+                                  borderRadius: 'var(--r-sm)', cursor: 'pointer',
+                                  background: isLogOpen ? 'rgba(59,130,246,.15)' : 'var(--surface-2)',
+                                  color: isLogOpen ? '#60a5fa' : '#3b82f6',
+                                  borderWidth: 1, borderStyle: 'solid',
+                                  borderColor: isLogOpen ? 'rgba(59,130,246,.3)' : 'rgba(59,130,246,.2)',
+                                }}
+                              >
+                                {isLogOpen ? 'Hide logs' : 'View logs'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Inline log viewer */}
+                        {isLogOpen && (
+                          <div style={{ padding: '0 14px 12px 34px' }}>
+                            {!logData || logData.loading ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                <div style={{ fontSize: 10, color: 'var(--tx-3)' }}>Fetching logs + AI analysis…</div>
+                                {Array.from({ length: 4 }, (_, si) => (
+                                  <div key={si} className="skeleton" style={{ height: 8, maxWidth: `${80 - si * 10}%` }} />
+                                ))}
+                              </div>
+                            ) : logData.error ? (
+                              <div style={{ fontSize: 10, color: C.danger }}>⚠ {logData.error}</div>
+                            ) : (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                {logData.analysis && (
+                                  <div style={{ background: 'rgba(59,130,246,.08)', borderWidth: 1, borderStyle: 'solid', borderColor: 'rgba(59,130,246,.2)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>
+                                    <div style={{ fontSize: 9, fontWeight: 700, color: '#60a5fa', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>AI Diagnosis</div>
+                                    <p style={{ margin: 0, fontSize: 11, color: 'var(--tx-1)', lineHeight: 1.55 }}>{logData.analysis}</p>
+                                  </div>
+                                )}
+                                {logData.events.length === 0 ? (
+                                  <div style={{ fontSize: 10, color: 'var(--tx-3)', fontStyle: 'italic' }}>No log events found in this ±2 min window.</div>
+                                ) : (
+                                  <div>
+                                    <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 5 }}>
+                                      {logData.events.length} events · ±2 min window
+                                    </div>
+                                    <pre style={{ margin: 0, padding: '8px 10px', background: '#0d1117', borderRadius: 'var(--r-sm)', fontSize: 10, fontFamily: 'monospace', overflowX: 'auto', maxHeight: 220, overflowY: 'auto', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                      {logData.events.map((ev, ei) => {
+                                        const msg     = ev.message ?? ''
+                                        const isErr   = /error|fatal|exception/i.test(msg)
+                                        const isWarn  = /warn/i.test(msg)
+                                        const evTs    = ev.timestamp
+                                          ? new Date(ev.timestamp).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                                          : ''
+                                        return (
+                                          <div key={ei} style={{ color: isErr ? C.danger : isWarn ? C.warning : 'var(--tx-2)', marginBottom: 1 }}>
+                                            {evTs && <span style={{ color: 'var(--tx-3)', marginRight: 8, fontSize: 9 }}>{evTs}</span>}
+                                            {msg}
+                                          </div>
+                                        )
+                                      })}
+                                    </pre>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
 
           {/* Active incident */}
           {monitor.active_incident_id !== null && (
@@ -1172,7 +1553,7 @@ function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose }: {
                         style={{ width: 7, height: 7, borderRadius: '50%', background: inc.is_open ? C.danger : C.muted, flexShrink: 0 }}
                       />
                       <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--tx-1)' }}>
-                        {new Date(inc.started_at).toLocaleString('en-AU', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                        {new Date(inc.started_at).toLocaleString('en-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })} MYT
                       </span>
                       <span style={{ fontSize: 11, color: inc.is_open ? C.danger : 'var(--tx-3)', marginLeft: 'auto', fontWeight: inc.is_open ? 600 : 400 }}>
                         {incidentDurationStr(inc)}
@@ -1190,12 +1571,12 @@ function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose }: {
                     {inc.attack_indicators && inc.attack_indicators.length > 0 && (
                       <div style={{ marginTop: 6 }}>
                         <button
-                          onClick={() => setExpandedId(expandedId === inc.id ? null : inc.id)}
+                          onClick={() => toggleIndicators(inc.id)}
                           style={{ fontSize: 10, color: 'var(--tx-3)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
                         >
-                          {expandedId === inc.id ? 'Hide' : 'Show'} indicators
+                          {expandedIds.has(inc.id) ? 'Hide' : 'Show'} indicators
                         </button>
-                        {expandedId === inc.id && (
+                        {expandedIds.has(inc.id) && (
                           <ul style={{ margin: '4px 0 0', paddingLeft: 14 }}>
                             {inc.attack_indicators.map((ind, i) => (
                               <li key={i} style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 2 }}>{ind}</li>
@@ -1241,7 +1622,52 @@ function SkeletonCard() {
 
 // ─── Tab Types & Bar ─────────────────────────────────────────
 
-type HealthTab = 'overview' | 'monitors' | 'checks' | 'performance' | 'incidents'
+type HealthTab = 'overview' | 'monitors' | 'checks' | 'performance' | 'incidents' | 'anomalies'
+
+type TimeRange = 'today' | '7d' | '30d' | '60d' | 'all' | 'custom'
+
+interface TimeWindow { since: string | null; until: string | null }
+
+const TIME_RANGE_OPTS: { id: TimeRange; label: string }[] = [
+  { id: 'today',  label: 'Today'    },
+  { id: '7d',     label: '7 days'   },
+  { id: '30d',    label: '30 days'  },
+  { id: '60d',    label: '2 months' },
+  { id: 'all',    label: 'All time' },
+  { id: 'custom', label: 'Custom'   },
+]
+
+function getTimeWindow(r: TimeRange, customFrom?: string, customTo?: string): TimeWindow {
+  if (r === 'custom' && customFrom && customTo) {
+    return {
+      since: new Date(customFrom + 'T00:00:00+08:00').toISOString(),
+      until: new Date(customTo   + 'T23:59:59+08:00').toISOString(),
+    }
+  }
+  const days = r === 'today' ? 1 : r === '7d' ? 7 : r === '30d' ? 30 : r === '60d' ? 60 : null
+  if (days === null) return { since: null, until: null }
+  return { since: new Date(Date.now() - days * 86_400_000).toISOString(), until: null }
+}
+
+function getWindowLabel(r: TimeRange, customFrom?: string, customTo?: string): string {
+  if (r === 'custom' && customFrom && customTo) return `${customFrom} → ${customTo} MYT`
+  if (r === 'today') return 'Last 24h'
+  if (r === '7d')    return 'Last 7 days'
+  if (r === '30d')   return 'Last 30 days'
+  if (r === '60d')   return 'Last 2 months'
+  return 'All time'
+}
+
+// ─── Monitor check range (for detail panel sparkline) ─────────
+type CheckRange = '30m' | '1h' | '2h' | '6h' | '12h' | '24h'
+const CHECK_RANGE_OPTS: { id: CheckRange; label: string; minutes: number }[] = [
+  { id: '30m', label: '30 min', minutes: 30   },
+  { id: '1h',  label: '1 h',   minutes: 60   },
+  { id: '2h',  label: '2 h',   minutes: 120  },
+  { id: '6h',  label: '6 h',   minutes: 360  },
+  { id: '12h', label: '12 h',  minutes: 720  },
+  { id: '24h', label: '1 day', minutes: 1440 },
+]
 
 function TabBar({ active, onChange, badges }: {
   active: HealthTab
@@ -1254,6 +1680,7 @@ function TabBar({ active, onChange, badges }: {
     { id: 'checks',      label: 'Failed Checks' },
     { id: 'performance', label: 'Performance' },
     { id: 'incidents',   label: 'Incidents' },
+    { id: 'anomalies',   label: 'Anomalies' },
   ]
   return (
     <div style={{ display: 'flex', gap: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', marginBottom: 24, overflowX: 'auto' }}>
@@ -1285,70 +1712,224 @@ function TabBar({ active, onChange, badges }: {
   )
 }
 
-// ─── Suppressed Panel ─────────────────────────────────────────
+// ─── Down Services Popover & Time Range Bar ───────────────────
 
-interface SuppressedItem {
-  id: string
-  category: string
-  label: string
-  color: string
-  details?: string
-}
-
-function SuppressedPanel({ items, onRestore, onRestoreAll }: {
-  items: SuppressedItem[]
-  onRestore: (id: string) => void
-  onRestoreAll: () => void
+function DownServicesPopover({ monitors, onSelect, onClose }: {
+  monitors: MonitorRow[]
+  onSelect: (m: MonitorRow) => void
+  onClose: () => void
 }) {
-  if (items.length === 0) return null
   return (
-    <div style={{ background: C.warningBg, borderWidth: 1, borderStyle: 'solid', borderColor: C.warningBorder, borderRadius: 'var(--r-md)', padding: '12px 16px', marginTop: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.warning }}>
-          {items.length} suppressed warning{items.length !== 1 ? 's' : ''}
-        </span>
-        <button onClick={onRestoreAll} style={{ fontSize: 11, fontWeight: 600, color: 'var(--tx-2)', background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-sm)', padding: '2px 10px', cursor: 'pointer' }}>
-          Restore all
-        </button>
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {items.map(item => (
-          <div key={item.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-sm)', padding: '8px 12px' }}>
+    <>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+      <div style={{
+        position: 'absolute', top: 'calc(100% + 6px)', right: 0,
+        background: 'var(--surface-1)',
+        borderWidth: 1, borderStyle: 'solid', borderColor: C.dangerBorder,
+        borderRadius: 'var(--r-lg)', boxShadow: 'var(--shadow-lg)',
+        zIndex: 41, minWidth: 290, overflow: 'hidden',
+      }}>
+        <div style={{ padding: '8px 14px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="anim-pulse" style={{ width: 7, height: 7, borderRadius: '50%', background: C.danger, flexShrink: 0 }} />
+          <span style={{ fontSize: 11, fontWeight: 700, color: C.danger, textTransform: 'uppercase', letterSpacing: '.06em' }}>
+            {monitors.length} Service{monitors.length !== 1 ? 's' : ''} Down
+          </span>
+        </div>
+        {monitors.map((m, i) => (
+          <button key={m.id} onClick={() => onSelect(m)}
+            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: 'none', cursor: 'pointer', textAlign: 'left', borderBottomWidth: i < monitors.length - 1 ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}
+            onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)'}
+            onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = ''}>
+            <span className="anim-pulse" style={{ width: 8, height: 8, borderRadius: '50%', background: C.danger, flexShrink: 0 }} />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 10, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 2 }}>{item.category}</div>
-              <div style={{ fontSize: 12, color: item.color, fontWeight: 500, lineHeight: 1.4 }}>{item.label}</div>
-              {item.details && <div style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 2 }}>{item.details}</div>}
+              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx-1)' }}>{m.name}</div>
+              <div style={{ fontSize: 11, color: 'var(--tx-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {m.incident_started_at ? `Down since ${incidentAge(m.incident_started_at)}` : 'Currently down'} · {m.target}
+              </div>
             </div>
-            <button onClick={() => onRestore(item.id)} style={{ fontSize: 10, fontWeight: 600, padding: '2px 9px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)', color: 'var(--tx-2)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', cursor: 'pointer', flexShrink: 0 }}>
-              Restore
-            </button>
-          </div>
+            <span style={{ fontSize: 10, color: C.danger, fontWeight: 600, flexShrink: 0 }}>View →</span>
+          </button>
         ))}
       </div>
+    </>
+  )
+}
+
+function TimeRangeBar({ value, onChange, customFrom, customTo, onCustomFrom, onCustomTo }: {
+  value: TimeRange
+  onChange: (r: TimeRange) => void
+  customFrom: string
+  customTo: string
+  onCustomFrom: (d: string) => void
+  onCustomTo: (d: string) => void
+}) {
+  const today = todayMYT()
+  const inputStyle: React.CSSProperties = {
+    padding: '2px 7px', fontSize: 11, fontWeight: 500,
+    background: 'var(--surface-1)', color: 'var(--tx-1)',
+    border: '1px solid var(--border)', borderRadius: 'var(--r-sm)',
+    colorScheme: 'dark',
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 3, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: 3, flexShrink: 0, flexWrap: 'wrap' }}>
+      {TIME_RANGE_OPTS.map(r => {
+        const active = value === r.id
+        return (
+          <button key={r.id} onClick={() => onChange(r.id)} style={{
+            fontSize: 12, fontWeight: active ? 700 : 400, padding: '4px 12px',
+            borderRadius: 'var(--r-sm)', background: active ? 'var(--orange-dim)' : 'transparent',
+            color: active ? 'var(--orange)' : 'var(--tx-3)', border: 'none', cursor: 'pointer',
+            transition: 'all .15s', whiteSpace: 'nowrap',
+          }}>
+            {r.label}
+          </button>
+        )
+      })}
+      {value === 'custom' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 8, borderLeft: '1px solid var(--border)', marginLeft: 2, flexWrap: 'wrap' }}>
+          <input type="date" value={customFrom} max={customTo || today}
+            onChange={e => onCustomFrom(e.target.value)} style={inputStyle} />
+          <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>to</span>
+          <input type="date" value={customTo} min={customFrom} max={today}
+            onChange={e => onCustomTo(e.target.value)} style={inputStyle} />
+          <span style={{ fontSize: 10, color: 'var(--tx-3)', whiteSpace: 'nowrap' }}>MYT</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Monitor Table Widget (compact, paginated) ────────────────
+
+function MonitorTableWidget({ monitors, loading, onOpenMonitor, tableLimit, onViewAll }: {
+  monitors: MonitorRow[]
+  loading: boolean
+  onOpenMonitor: (m: MonitorRow) => void
+  tableLimit: number
+  onViewAll: () => void
+}) {
+  const [showAll, setShowAll] = useState(false)
+  const rows = showAll ? monitors : monitors.slice(0, tableLimit)
+  const hidden = monitors.length - tableLimit
+
+  return (
+    <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)' }}>Monitor Status</span>
+        {!loading && <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{monitors.length} active</span>}
+        <button onClick={onViewAll} style={{ marginLeft: 'auto', fontSize: 11, color: '#3b82f6', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>
+          Full view →
+        </button>
+      </div>
+      {loading ? (
+        <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {Array.from({ length: 4 }, (_, i) => <div key={i} className="skeleton" style={{ height: 10 }} />)}
+        </div>
+      ) : monitors.length === 0 ? (
+        <div style={{ padding: '20px 16px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 12 }}>No monitors configured.</div>
+      ) : (
+        <>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: 'var(--surface-2)' }}>
+                  {['Monitor', 'Status', 'Uptime', 'Response', 'Last check'].map(h => (
+                    <th key={h} style={{ padding: '6px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', whiteSpace: 'nowrap', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((mon, i) => {
+                  const info = statusInfo(mon)
+                  const u7   = uptimeColors(mon.uptime_7d)
+                  return (
+                    <tr
+                      key={mon.id}
+                      onClick={() => onOpenMonitor(mon)}
+                      style={{ borderBottomWidth: i < rows.length - 1 ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', cursor: 'pointer' }}
+                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)'}
+                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = ''}
+                    >
+                      <td style={{ padding: '7px 12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                          <span className={info.pulse ? 'anim-pulse' : undefined} style={{ width: 6, height: 6, borderRadius: '50%', background: info.color, flexShrink: 0 }} />
+                          <span style={{ fontWeight: 500, color: 'var(--tx-1)', whiteSpace: 'nowrap', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{mon.name}</span>
+                        </div>
+                      </td>
+                      <td style={{ padding: '7px 12px', whiteSpace: 'nowrap' }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: info.color }}>{info.label}</span>
+                      </td>
+                      <td style={{ padding: '7px 12px' }}>
+                        <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 8, borderWidth: 1, borderStyle: 'solid', borderColor: u7.border, background: u7.bg, color: u7.text, whiteSpace: 'nowrap' }}>
+                          {mon.uptime_7d !== null ? `${mon.uptime_7d.toFixed(1)}%` : '—'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '7px 12px', fontFamily: 'monospace', fontSize: 11, color: responseColor(mon.avg_response_24h, null), whiteSpace: 'nowrap' }}>
+                        {mon.avg_response_24h !== null && mon.avg_response_24h < 9500 ? `${Math.round(mon.avg_response_24h)}ms` : '—'}
+                      </td>
+                      <td style={{ padding: '7px 12px', fontSize: 10, color: 'var(--tx-3)', whiteSpace: 'nowrap' }}>
+                        {relativeTime(mon.last_checked_at)}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {!showAll && hidden > 0 && (
+            <div style={{ padding: '8px 16px', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button
+                onClick={() => setShowAll(true)}
+                style={{ fontSize: 11, color: '#3b82f6', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}
+              >
+                Show {hidden} more ↓
+              </button>
+              <span style={{ fontSize: 10, color: 'var(--tx-3)' }}>or use the Monitors tab for full details</span>
+            </div>
+          )}
+          {showAll && monitors.length > tableLimit && (
+            <div style={{ padding: '8px 16px', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--border)' }}>
+              <button
+                onClick={() => setShowAll(false)}
+                style={{ fontSize: 11, color: 'var(--tx-3)', background: 'none', border: 'none', cursor: 'pointer' }}
+              >
+                Show less ↑
+              </button>
+            </div>
+          )}
+        </>
+      )}
     </div>
   )
 }
 
 // ─── Overview Tab ─────────────────────────────────────────────
 
-function OverviewTab({ monitors, incidents, failedChecks, loading, suppressedIds, onSuppress, onUnsuppress, onUnsuppressAll, onNavigate, onOpenMonitor }: {
+function OverviewTab({ monitors, incidents, failedChecks, loading, timeRange, onNavigate, onOpenMonitor }: {
   monitors: MonitorRow[]
   incidents: IncidentRow[]
   failedChecks: FailedCheckRow[]
   loading: boolean
-  suppressedIds: Set<string>
-  onSuppress: (id: string) => void
-  onUnsuppress: (id: string) => void
-  onUnsuppressAll: () => void
+  timeRange: TimeRange
   onNavigate: (tab: HealthTab) => void
   onOpenMonitor: (mon: MonitorRow) => void
 }) {
-  const [showSuppressed, setShowSuppressed] = useState(false)
   const m = useMemo(() => computeMetrics(monitors, incidents), [monitors, incidents])
   const bullets = useMemo(() => buildBullets(m), [m])
 
-  const visibleBullets   = bullets.filter(b => !suppressedIds.has(`bullet:${b.key}`))
-  const suppressedBullets = bullets.filter(b => suppressedIds.has(`bullet:${b.key}`))
+  // Pick the pre-computed uptime column that best matches the selected time range
+  const uptimeField: keyof MonitorRow =
+    timeRange === 'today' ? 'uptime_24h' :
+    timeRange === '7d'    ? 'uptime_7d'  : 'uptime_30d'
+  const uptimeLabel =
+    timeRange === 'today' ? '24h avg uptime' :
+    timeRange === '7d'    ? '7d avg uptime'  : '30d avg uptime'
+  const activeScore = useMemo(() => {
+    const enabled = monitors.filter(mon => mon.enabled)
+    const withData = enabled.filter(mon => mon[uptimeField] !== null)
+    if (!withData.length) return null
+    return withData.reduce((sum, mon) => sum + ((mon[uptimeField] as number) ?? 0), 0) / withData.length
+  }, [monitors, uptimeField])
 
   // Failed check groups
   const byMonitor = useMemo(() => {
@@ -1359,36 +1940,16 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, suppressedIds
     }
     return map
   }, [failedChecks])
-  const failMonitorIds  = Object.keys(byMonitor)
-  const visibleFailIds  = failMonitorIds.filter(id => !suppressedIds.has(`failchecks:${id}`))
-  const visibleFailCount = visibleFailIds.reduce((s, id) => s + byMonitor[id].length, 0)
+  const failMonitorIds   = Object.keys(byMonitor)
+  const visibleFailCount = failedChecks.length
 
   // Slow monitors
-  const allSlow = monitors.filter(mon => {
+  const slowCount = monitors.filter(mon => {
     if (!mon.avg_response_24h || !mon.enabled) return false
     return mon.avg_response_24h >= (isWebEndpoint(mon.name) ? 800 : 200)
-  })
-  const visibleSlow = allSlow.filter(mon => !suppressedIds.has(`slow:${mon.id}`))
+  }).length
 
-  // Build full suppressed items list for the panel
-  const suppressedItems: SuppressedItem[] = [
-    ...suppressedBullets.map(b => ({
-      id: `bullet:${b.key}`, category: 'Health Signal', label: b.text, color: b.color,
-    })),
-    ...failMonitorIds.filter(id => suppressedIds.has(`failchecks:${id}`)).map(id => ({
-      id: `failchecks:${id}`, category: 'Failed Checks',
-      label: monitors.find(mon => mon.id === id)?.name ?? id,
-      color: C.danger,
-      details: `${byMonitor[id].length} failure${byMonitor[id].length !== 1 ? 's' : ''} in last 24h`,
-    })),
-    ...allSlow.filter(mon => suppressedIds.has(`slow:${mon.id}`)).map(mon => ({
-      id: `slow:${mon.id}`, category: 'Slow Monitor',
-      label: mon.name, color: C.warning,
-      details: `${Math.round(mon.avg_response_24h ?? 0)}ms avg response`,
-    })),
-  ]
-
-  const score   = m.avgUptime7d
+  const score   = activeScore
   const sColor  = score !== null ? scoreColor(score) : C.muted
   const sLabel  = score !== null ? scoreLabel(score) : 'Unknown'
   const statusSummary = [
@@ -1425,7 +1986,7 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, suppressedIds
           {loading ? (
             <div className="skeleton" style={{ width: 140, height: 140, borderRadius: '50%' }} />
           ) : (
-            <UptimeRing value={score} size={140} sub="7d avg uptime" />
+            <UptimeRing value={score} size={140} sub={uptimeLabel} />
           )}
           <span style={{
             fontSize: 11, fontWeight: 700, padding: '3px 14px', borderRadius: 20,
@@ -1453,7 +2014,7 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, suppressedIds
 
           {/* Inline stat chips */}
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-            <StatChip label="Incidents (7d)" value={String(m.incidents7d.length)} color={m.openIncidents.length > 0 ? C.danger : m.incidents7d.length > 0 ? C.warning : C.success} sub={m.openIncidents.length > 0 ? `${m.openIncidents.length} open` : m.incidents7d.length === 0 ? 'None this week' : 'All resolved'} />
+            <StatChip label={`Incidents (${uptimeLabel.split(' ')[0]})`} value={String(m.incidents7d.length)} color={m.openIncidents.length > 0 ? C.danger : m.incidents7d.length > 0 ? C.warning : C.success} sub={m.openIncidents.length > 0 ? `${m.openIncidents.length} open` : m.incidents7d.length === 0 ? 'None this period' : 'All resolved'} />
             <StatChip label="Avg response" value={m.avgResponseMs !== null ? `${m.avgResponseMs}ms` : '—'} color={m.avgResponseMs !== null ? responseColor(m.avgResponseMs, null) : C.muted} sub="healthy monitors" />
             {m.avgResolutionSec !== null && <StatChip label="Avg resolution" value={formatDuration(Math.round(m.avgResolutionSec))} color="var(--tx-1)" sub="per incident" />}
           </div>
@@ -1464,30 +2025,28 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, suppressedIds
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
         <button
           onClick={() => onNavigate('checks')}
-          style={CARD_BTN(visibleFailIds.length > 0 ? C.dangerBorder : 'var(--border)')}
+          style={CARD_BTN(failMonitorIds.length > 0 ? C.dangerBorder : 'var(--border)')}
           onMouseEnter={e => (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-sm)'}
           onMouseLeave={e => (e.currentTarget as HTMLElement).style.boxShadow = 'none'}
         >
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Failed Checks (24h)</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: visibleFailIds.length > 0 ? C.danger : C.muted, lineHeight: 1.1 }}>{visibleFailCount}</div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Failed Checks</div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: failMonitorIds.length > 0 ? C.danger : C.muted, lineHeight: 1.1 }}>{visibleFailCount}</div>
           <div style={{ fontSize: 11, color: 'var(--tx-3)' }}>
-            {visibleFailIds.length > 0 ? `${visibleFailIds.length} monitor${visibleFailIds.length !== 1 ? 's' : ''} affected` : 'No failures'}
-            {failMonitorIds.length > visibleFailIds.length ? ` · ${failMonitorIds.length - visibleFailIds.length} muted` : ''}
+            {failMonitorIds.length > 0 ? `${failMonitorIds.length} monitor${failMonitorIds.length !== 1 ? 's' : ''} affected` : 'No failures'}
           </div>
           <div style={{ fontSize: 11, color: '#3b82f6', fontWeight: 600, marginTop: 4 }}>View details →</div>
         </button>
 
         <button
           onClick={() => onNavigate('performance')}
-          style={CARD_BTN(visibleSlow.length > 0 ? C.warningBorder : 'var(--border)')}
+          style={CARD_BTN(slowCount > 0 ? C.warningBorder : 'var(--border)')}
           onMouseEnter={e => (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-sm)'}
           onMouseLeave={e => (e.currentTarget as HTMLElement).style.boxShadow = 'none'}
         >
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Slow Monitors</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: visibleSlow.length > 0 ? C.warning : C.muted, lineHeight: 1.1 }}>{visibleSlow.length}</div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: slowCount > 0 ? C.warning : C.muted, lineHeight: 1.1 }}>{slowCount}</div>
           <div style={{ fontSize: 11, color: 'var(--tx-3)' }}>
-            {visibleSlow.length > 0 ? 'above response threshold' : 'All within target'}
-            {allSlow.length > visibleSlow.length ? ` · ${allSlow.length - visibleSlow.length} muted` : ''}
+            {slowCount > 0 ? 'above response threshold' : 'All within target'}
           </div>
           <div style={{ fontSize: 11, color: '#3b82f6', fontWeight: 600, marginTop: 4 }}>View details →</div>
         </button>
@@ -1501,7 +2060,7 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, suppressedIds
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Open Incidents</div>
           <div style={{ fontSize: 26, fontWeight: 800, color: m.openIncidents.length > 0 ? C.danger : C.muted, lineHeight: 1.1 }}>{m.openIncidents.length}</div>
           <div style={{ fontSize: 11, color: 'var(--tx-3)' }}>
-            {m.openIncidents.length > 0 ? 'active right now' : `${m.incidents7d.length} this week, all resolved`}
+            {m.openIncidents.length > 0 ? 'active right now' : `${m.incidents7d.length} in period, all resolved`}
           </div>
           <div style={{ fontSize: 11, color: '#3b82f6', fontWeight: 600, marginTop: 4 }}>View all →</div>
         </button>
@@ -1520,112 +2079,37 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, suppressedIds
       <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 18px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>
           <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--tx-1)' }}>Health Signals</span>
-          <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{visibleBullets.length} visible</span>
-          {suppressedItems.length > 0 && (
-            <button
-              onClick={() => setShowSuppressed(s => !s)}
-              style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 600, padding: '3px 12px', borderRadius: 10, background: showSuppressed ? C.warningBg : 'var(--surface-2)', color: showSuppressed ? C.warning : 'var(--tx-3)', borderWidth: 1, borderStyle: 'solid', borderColor: showSuppressed ? C.warningBorder : 'var(--border)', cursor: 'pointer' }}
-            >
-              {showSuppressed ? '▲ Hide suppressed' : `Suppressed (${suppressedItems.length})`}
-            </button>
-          )}
+          <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{bullets.length} signal{bullets.length !== 1 ? 's' : ''}</span>
         </div>
         <div style={{ padding: '12px 18px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {visibleBullets.length === 0 && !showSuppressed && (
-            <div style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic', padding: '4px 0' }}>
-              All signals are muted.{' '}
-              <button onClick={() => setShowSuppressed(true)} style={{ background: 'none', border: 'none', color: C.warning, cursor: 'pointer', fontSize: 12, fontStyle: 'normal', padding: 0 }}>
-                View suppressed →
-              </button>
-            </div>
-          )}
-          {visibleBullets.map(b => (
+          {bullets.map(b => (
             <div key={b.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 12px', background: 'var(--surface-2)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-md)' }}>
               <span style={{ fontSize: 12, fontWeight: 800, color: b.color, flexShrink: 0, lineHeight: '18px' }}>{b.icon}</span>
               <span style={{ fontSize: 13, color: 'var(--tx-1)', lineHeight: '18px', flex: 1 }}>{b.text}</span>
-              <button
-                onClick={() => onSuppress(`bullet:${b.key}`)}
-                title="Mute this signal"
-                style={{ fontSize: 10, fontWeight: 600, padding: '1px 9px', borderRadius: 'var(--r-sm)', background: 'var(--surface-1)', color: 'var(--tx-3)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', cursor: 'pointer', flexShrink: 0, lineHeight: '18px' }}
-              >
-                Mute
-              </button>
             </div>
           ))}
-          {showSuppressed && (
-            <SuppressedPanel items={suppressedItems} onRestore={onUnsuppress} onRestoreAll={onUnsuppressAll} />
-          )}
         </div>
       </div>
 
       {/* ── Monitor details table ── */}
-      <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 18px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>
-          <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--tx-1)' }}>Monitor Details</span>
-          <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>Click any row for full details</span>
-        </div>
-        {loading ? (
-          <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {Array.from({ length: 4 }, (_, i) => <div key={i} className="skeleton" style={{ height: 12 }} />)}
-          </div>
-        ) : monitors.filter(mon => mon.enabled).length === 0 ? (
-          <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 13 }}>No monitors configured.</div>
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-              <thead>
-                <tr style={{ background: 'var(--surface-2)' }}>
-                  {['Monitor', 'Status', '7d Uptime', '24h Uptime', 'Avg Response', 'Last Check'].map(h => (
-                    <th key={h} style={{ padding: '8px 16px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', whiteSpace: 'nowrap', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {monitors.filter(mon => mon.enabled).map((mon, i, arr) => {
-                  const info = statusInfo(mon)
-                  const u7  = uptimeColors(mon.uptime_7d)
-                  const u24 = uptimeColors(mon.uptime_24h)
-                  return (
-                    <tr
-                      key={mon.id}
-                      onClick={() => onOpenMonitor(mon)}
-                      style={{ borderBottomWidth: i < arr.length - 1 ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', cursor: 'pointer' }}
-                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)'}
-                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = ''}
-                    >
-                      <td style={{ padding: '10px 16px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span className={info.pulse ? 'anim-pulse' : undefined} style={{ width: 7, height: 7, borderRadius: '50%', background: info.color, flexShrink: 0 }} />
-                          <span style={{ fontWeight: 600, color: 'var(--tx-1)', whiteSpace: 'nowrap' }}>{mon.name}</span>
-                        </div>
-                      </td>
-                      <td style={{ padding: '10px 16px', whiteSpace: 'nowrap' }}>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: info.color }}>{info.label}</span>
-                      </td>
-                      <td style={{ padding: '10px 16px' }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 10, borderWidth: 1, borderStyle: 'solid', borderColor: u7.border, background: u7.bg, color: u7.text, whiteSpace: 'nowrap' }}>
-                          {mon.uptime_7d !== null ? `${mon.uptime_7d.toFixed(1)}%` : '—'}
-                        </span>
-                      </td>
-                      <td style={{ padding: '10px 16px' }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 10, borderWidth: 1, borderStyle: 'solid', borderColor: u24.border, background: u24.bg, color: u24.text, whiteSpace: 'nowrap' }}>
-                          {mon.uptime_24h !== null ? `${mon.uptime_24h.toFixed(1)}%` : '—'}
-                        </span>
-                      </td>
-                      <td style={{ padding: '10px 16px', fontFamily: 'monospace', fontSize: 12, color: responseColor(mon.avg_response_24h, null), whiteSpace: 'nowrap' }}>
-                        {mon.avg_response_24h !== null && mon.avg_response_24h < 9500 ? `${Math.round(mon.avg_response_24h)}ms` : '—'}
-                      </td>
-                      <td style={{ padding: '10px 16px', fontSize: 11, color: 'var(--tx-3)', whiteSpace: 'nowrap' }}>
-                        {relativeTime(mon.last_checked_at)}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      {(() => {
+        const TABLE_LIMIT = 8
+        const enabledMons = monitors.filter(mon => mon.enabled)
+        // Sort: down first, then degraded, then by name
+        const sorted = [...enabledMons].sort((a, b) => {
+          const rank = (m: MonitorRow) => m.status === 'down' ? 0 : m.status === 'degraded' ? 1 : 2
+          return rank(a) - rank(b) || a.name.localeCompare(b.name)
+        })
+        return (
+        <MonitorTableWidget
+          monitors={sorted}
+          loading={loading}
+          onOpenMonitor={onOpenMonitor}
+          tableLimit={TABLE_LIMIT}
+          onViewAll={() => onNavigate('monitors')}
+        />
+        )
+      })()}
     </div>
   )
 }
@@ -1642,23 +2126,80 @@ export default function ServerHealthPage() {
   const [refreshing,       setRefreshing]       = useState(false)
   const [secondsAgo,       setSecondsAgo]       = useState(0)
   const [expandedMonitor,  setExpandedMonitor]  = useState<MonitorRow | null>(null)
-  const [expandedIncId,    setExpandedIncId]    = useState<string | null>(null)
+  const [expandedIncIds,   setExpandedIncIds]   = useState<Set<string>>(new Set())
   const [failedChecks,     setFailedChecks]     = useState<FailedCheckRow[]>([])
   const [incPage,          setIncPage]          = useState(0)
   const [activeTab,        setActiveTab]        = useState<HealthTab>(() => {
     if (typeof window === 'undefined') return 'overview'
     try {
       const saved = localStorage.getItem('server-health-tab') as HealthTab
-      const VALID: HealthTab[] = ['overview', 'monitors', 'checks', 'performance', 'incidents']
+      const VALID: HealthTab[] = ['overview', 'monitors', 'checks', 'performance', 'incidents', 'anomalies']
       return VALID.includes(saved) ? saved : 'overview'
     } catch { return 'overview' }
   })
-  const [suppressedWarnings, setSuppressedWarnings] = useState<Set<string>>(new Set())
+  const [timeRange,        setTimeRange]        = useState<TimeRange>('today')
+  const [customFrom,       setCustomFrom]       = useState(() => {
+    const d = new Date(Date.now() + 8 * 3_600_000 - 7 * 86_400_000)
+    return d.toISOString().slice(0, 10)
+  })
+  const [customTo,         setCustomTo]         = useState(todayMYT)
+  const [sparklineRange,   setSparklineRange]   = useState<CheckRange>('1h')
+  const [dataLoading,      setDataLoading]      = useState(false)
+  const [showDownPopover,  setShowDownPopover]  = useState(false)
+  const [anomalies,        setAnomalies]        = useState<AnomalyRow[]>([])
+  const [expandedAnomalyId, setExpandedAnomalyId] = useState<string | null>(null)
+  const [anomalyLogs, setAnomalyLogs] = useState<Record<string, {
+    events: { timestamp: number | null; message: string }[]
+    analysis: string | null
+    loading: boolean
+    error: string | null
+  }>>({})
+  const postedAnomalyKeys  = useRef<Set<string>>(new Set())
+  const fetchedAnomalyIds  = useRef<Set<string>>(new Set())
   const INC_PAGE_SIZE = 8
 
-  const suppress   = useCallback((id: string) => setSuppressedWarnings(prev => new Set([...prev, id])), [])
-  const unsuppress = useCallback((id: string) => setSuppressedWarnings(prev => { const n = new Set(prev); n.delete(id); return n }), [])
-  const unsuppressAll = useCallback(() => setSuppressedWarnings(new Set()), [])
+  const isMaintenance = isMYTMaintenanceNow()
+
+  const toggleIncident = useCallback((id: string) => {
+    setExpandedIncIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }, [])
+
+  const fetchAnomalyLogs = useCallback(async (a: AnomalyRow) => {
+    const logGroup = deriveLogGroup(a.monitor_target)
+    if (!logGroup) return
+    if (fetchedAnomalyIds.current.has(a.id)) return  // cached
+    fetchedAnomalyIds.current.add(a.id)
+    setAnomalyLogs(prev => ({ ...prev, [a.id]: { events: [], analysis: null, loading: true, error: null } }))
+    const ts = new Date(a.checked_at).getTime()
+    const params = new URLSearchParams({
+      logGroup,
+      start: String(ts - 2 * 60_000),
+      end: String(ts + 2 * 60_000),
+      monitorId: a.monitor_id,
+      checkedAt: a.checked_at,
+    })
+    if (a.status_code) params.set('filter', String(a.status_code))
+    try {
+      const res = await fetch(`/api/cloudwatch-logs?${params}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed')
+      setAnomalyLogs(prev => ({ ...prev, [a.id]: { events: data.events, analysis: data.analysis, loading: false, error: null } }))
+      // Update local anomalies state so "Initial AI Diagnosis" column reflects the saved result
+      if (data.analysis) {
+        setAnomalies(prev => prev.map(item =>
+          item.id === a.id && !item.ai_analysis ? { ...item, ai_analysis: data.analysis } : item
+        ))
+      }
+    } catch (err: unknown) {
+      fetchedAnomalyIds.current.delete(a.id)  // allow retry
+      const msg = err instanceof Error ? err.message : 'Failed to load logs'
+      setAnomalyLogs(prev => ({ ...prev, [a.id]: { events: [], analysis: null, loading: false, error: msg } }))
+    }
+  }, [])
 
   const fetchAll = useCallback(async (background = false) => {
     if (background) setRefreshing(true)
@@ -1675,44 +2216,113 @@ export default function ServerHealthPage() {
 
       const checksMap: ChecksByMonitor = {}
       if (monList.length > 0) {
+        const sparkOpt = CHECK_RANGE_OPTS.find(o => o.id === sparklineRange)!
+        const sparkSince = new Date(Date.now() - sparkOpt.minutes * 60_000).toISOString()
+        // Cap at 200 points per monitor — enough for smooth sparklines even at 1-day range
+        const pointCap = 200
         const { data: cData, error: cErr } = await supabase
           .from('checks')
-          .select('monitor_id, status, response_time_ms, checked_at')
+          .select('monitor_id, status, response_time_ms, checked_at, error_class, error_message, status_code')
           .in('monitor_id', monList.map(m => m.id))
+          .gte('checked_at', sparkSince)
           .order('checked_at', { ascending: false })
-          .limit(60 * monList.length)
+          .limit(pointCap * monList.length)
         if (cErr) throw cErr
 
         for (const row of (cData ?? []) as CheckRow[]) {
           if (!checksMap[row.monitor_id]) checksMap[row.monitor_id] = []
-          if (checksMap[row.monitor_id].length < 60) checksMap[row.monitor_id].push(row)
+          if (checksMap[row.monitor_id].length < pointCap && !isMaintenancePeriod(row.checked_at)) {
+            checksMap[row.monitor_id].push(row)
+          }
         }
-        // Reverse each group so sparkline renders oldest → newest (left → right)
         for (const k of Object.keys(checksMap)) checksMap[k].reverse()
       }
       setChecksByMonitor(checksMap)
 
-      const { data: iData, error: iErr } = await supabase
+      // ── Anomaly detection ─────────────────────────────────────
+      const newAnomalies: {
+        monitor_id: string; monitor_name: string; monitor_target: string
+        checked_at: string; anomaly_type: 'spike' | 'down' | 'degraded'
+        response_time_ms: number | null; avg_ms: number | null; spike_ratio: number | null
+        error_class: string | null; error_message: string | null; status_code: number | null
+        cloudwatch_url: string | null
+      }[] = []
+      for (const mon of monList) {
+        const rows = checksMap[mon.id] ?? []
+        const validMs = rows.map(r => r.response_time_ms).filter((v): v is number => v != null && v > 0)
+        const avgMs = validMs.length ? validMs.reduce((a, b) => a + b, 0) / validMs.length : 0
+        for (const row of rows) {
+          const key = `${mon.id}:${row.checked_at}`
+          if (postedAnomalyKeys.current.has(key)) continue
+          const isSpike = avgMs > 0 && (row.response_time_ms ?? 0) >= avgMs * 2
+          const isDown  = row.status === 'down'
+          const isDeg   = row.status === 'degraded'
+          if (!isSpike && !isDown && !isDeg) continue
+          postedAnomalyKeys.current.add(key)
+          const ratio = avgMs > 0 && row.response_time_ms ? row.response_time_ms / avgMs : null
+          newAnomalies.push({
+            monitor_id:      mon.id,
+            monitor_name:    mon.name,
+            monitor_target:  mon.target,
+            checked_at:      row.checked_at,
+            anomaly_type:    isDown ? 'down' : isDeg ? 'degraded' : 'spike',
+            response_time_ms: row.response_time_ms,
+            avg_ms:          avgMs > 0 ? Math.round(avgMs) : null,
+            spike_ratio:     ratio ? parseFloat(ratio.toFixed(2)) : null,
+            error_class:     row.error_class,
+            error_message:   row.error_message,
+            status_code:     row.status_code,
+            cloudwatch_url:  buildSpikeCloudWatchUrl(mon.target, row.checked_at, row.status_code),
+          })
+        }
+      }
+      if (newAnomalies.length) {
+        fetch('/api/anomalies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newAnomalies) })
+          .catch(() => {/* silent — anomaly storage is best-effort */})
+      }
+      // Fetch stored anomalies for Anomalies tab (last 30 days)
+      const { data: aData } = await supabase
+        .from('monitor_anomalies')
+        .select('*')
+        .gte('created_at', new Date(Date.now() - 30 * 86_400_000).toISOString())
+        .order('checked_at', { ascending: false })
+        .limit(500)
+      setAnomalies((aData ?? []) as AnomalyRow[])
+      // ─────────────────────────────────────────────────────────
+
+      const win = getTimeWindow(timeRange, customFrom, customTo)
+      let incQ = supabase
         .from('incidents')
         .select('*, monitors(name)')
         .order('started_at', { ascending: false })
-        .limit(50)
+        .limit(200)
+      if (win.since) incQ = incQ.gte('started_at', win.since)
+      if (win.until) incQ = incQ.lte('started_at', win.until)
+      const { data: iData, error: iErr } = await incQ
       if (iErr) throw iErr
-      setIncidents((iData ?? []) as IncidentRow[])
+      // Filter out incidents that started during maintenance
+      const allInc = (iData ?? []) as IncidentRow[]
+      setIncidents(allInc.filter(i => !isMaintenancePeriod(i.started_at)))
       setIncPage(0)
 
-      // Failed checks from last 24h (non-up statuses only)
+      // Failed checks — window controlled by timeRange
       if (monList.length > 0) {
-        const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-        const { data: fcData, error: fcErr } = await supabase
+        const w = getTimeWindow(timeRange, customFrom, customTo)
+        let fcQ = supabase
           .from('checks')
           .select('id, monitor_id, status, response_time_ms, status_code, error_class, error_message, checked_at')
           .in('monitor_id', monList.map(m => m.id))
           .neq('status', 'up')
-          .gte('checked_at', since24h)
           .order('checked_at', { ascending: false })
-          .limit(300)
-        if (!fcErr) setFailedChecks((fcData ?? []) as FailedCheckRow[])
+          .limit(w.since ? 500 : 1000)
+        if (w.since) fcQ = fcQ.gte('checked_at', w.since)
+        if (w.until) fcQ = fcQ.lte('checked_at', w.until)
+        const { data: fcData, error: fcErr } = await fcQ
+        if (!fcErr) {
+          const all = (fcData ?? []) as FailedCheckRow[]
+          // Exclude checks that occurred during maintenance window (00:00–09:00 MYT)
+          setFailedChecks(all.filter(c => !isMaintenancePeriod(c.checked_at)))
+        }
       }
 
       setSecondsAgo(0)
@@ -1722,13 +2332,14 @@ export default function ServerHealthPage() {
     } finally {
       setLoading(false)
       setRefreshing(false)
+      setDataLoading(false)
     }
-  }, [supabase])
+  }, [supabase, timeRange, customFrom, customTo, sparklineRange])
 
   useEffect(() => {
-    fetchAll(false)
+    const t = setTimeout(() => fetchAll(false), 0)
     const interval = setInterval(() => fetchAll(true), 30_000)
-    return () => clearInterval(interval)
+    return () => { clearTimeout(t); clearInterval(interval) }
   }, [fetchAll])
 
   useEffect(() => {
@@ -1751,13 +2362,15 @@ export default function ServerHealthPage() {
     const failGroups = new Set(failedChecks.map(fc => fc.monitor_id)).size
     const slow = monitors.filter(m => m.avg_response_24h && m.enabled && m.avg_response_24h >= (isWebEndpoint(m.name) ? 800 : 200)).length
     const openInc = incidents.filter(i => i.is_open).length
+    const recentAnomalies = anomalies.filter(a => Date.now() - new Date(a.checked_at).getTime() < 24 * 3_600_000).length
     return {
       monitors:    down > 0 ? down : undefined,
       checks:      failGroups > 0 ? failGroups : undefined,
       performance: slow > 0 ? slow : undefined,
       incidents:   openInc > 0 ? openInc : undefined,
+      anomalies:   recentAnomalies > 0 ? recentAnomalies : undefined,
     }
-  }, [monitors, failedChecks, incidents])
+  }, [monitors, failedChecks, incidents, anomalies])
 
   return (
     <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -1789,15 +2402,64 @@ export default function ServerHealthPage() {
               {!loading && <> · Last updated {secondsAgo === 0 ? 'just now' : `${secondsAgo}s ago`}</>}
             </p>
           </div>
-          {!loading && monitors.length > 0 && (
-            <span style={{ fontSize: 13, fontWeight: 700, padding: '6px 16px', borderRadius: 20, background: overallStatus.bg, color: overallStatus.color, borderWidth: 1, borderStyle: 'solid', borderColor: overallStatus.border, whiteSpace: 'nowrap', alignSelf: 'flex-start' }}>
-              {overallStatus.label}
-            </span>
-          )}
+          {!loading && monitors.length > 0 && (() => {
+            const downMonitors = monitors.filter(m => m.enabled && m.status === 'down')
+            return (
+              <div style={{ position: 'relative', alignSelf: 'flex-start' }}>
+                <button
+                  onClick={() => downMonitors.length > 0 && setShowDownPopover(s => !s)}
+                  style={{
+                    fontSize: 13, fontWeight: 700, padding: '6px 16px', borderRadius: 20,
+                    background: overallStatus.bg, color: overallStatus.color,
+                    borderWidth: 1, borderStyle: 'solid', borderColor: overallStatus.border,
+                    whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6,
+                    cursor: downMonitors.length > 0 ? 'pointer' : 'default',
+                  }}
+                >
+                  {overallStatus.label}
+                  {downMonitors.length > 0 && <span style={{ fontSize: 11, opacity: 0.7 }}>▾</span>}
+                </button>
+                {showDownPopover && downMonitors.length > 0 && (
+                  <DownServicesPopover
+                    monitors={downMonitors}
+                    onSelect={m => { setExpandedMonitor(m); setShowDownPopover(false) }}
+                    onClose={() => setShowDownPopover(false)}
+                  />
+                )}
+              </div>
+            )
+          })()}
         </div>
 
+        {/* Maintenance window notice */}
+        {isMaintenance && (
+          <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', marginBottom: 12, background: 'rgba(227,179,65,.10)', borderWidth: 1, borderStyle: 'solid', borderColor: 'rgba(227,179,65,.30)', borderRadius: 'var(--r-md)', fontSize: 12, color: C.warning }}>
+            <span style={{ fontSize: 14 }}>🔧</span>
+            <span><strong>Maintenance window active</strong> — 12:00 AM – 9:00 AM MYT. Failures during this period are excluded from all data.</span>
+          </div>
+        )}
+
+        {/* Time range + tab bar row */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 11, color: 'var(--tx-3)', whiteSpace: 'nowrap' }}>Show:</span>
+            <TimeRangeBar
+              value={timeRange}
+              onChange={r => { setTimeRange(r); setShowDownPopover(false); setDataLoading(true) }}
+              customFrom={customFrom}
+              customTo={customTo}
+              onCustomFrom={v => { setCustomFrom(v); setDataLoading(true) }}
+              onCustomTo={v => { setCustomTo(v); setDataLoading(true) }}
+            />
+          </div>
+          <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>
+            Maintenance hours (00:00–09:00 MYT) excluded from all data
+          </span>
+        </div>
         {/* Tab bar */}
-        <TabBar active={activeTab} onChange={t => { setActiveTab(t); setExpandedIncId(null); try { localStorage.setItem('server-health-tab', t) } catch {} }} badges={tabBadges} />
+        <TabBar active={activeTab} onChange={t => { setActiveTab(t); setExpandedIncIds(new Set()); try { localStorage.setItem('server-health-tab', t) } catch {} }} badges={tabBadges} />
+
+        <div style={{ opacity: dataLoading && !loading ? 0.55 : 1, transition: 'opacity 0.25s', pointerEvents: dataLoading && !loading ? 'none' : undefined }}>
 
         {/* ── Overview Tab ── */}
         {activeTab === 'overview' && (
@@ -1811,40 +2473,70 @@ export default function ServerHealthPage() {
               incidents={incidents}
               failedChecks={failedChecks}
               loading={loading}
-              suppressedIds={suppressedWarnings}
-              onSuppress={suppress}
-              onUnsuppress={unsuppress}
-              onUnsuppressAll={unsuppressAll}
-              onNavigate={t => { setActiveTab(t); setExpandedIncId(null) }}
+              timeRange={timeRange}
+              onNavigate={t => { setActiveTab(t); setExpandedIncIds(new Set()) }}
               onOpenMonitor={setExpandedMonitor}
             />
           )
         )}
 
         {/* ── Monitors Tab ── */}
-        {activeTab === 'monitors' && (
-          <>
-            {!loading && monitors.length > 0 && (
-              <HealthSummary monitors={monitors} incidents={incidents} />
-            )}
-            {loading ? (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
-                {Array.from({ length: 6 }, (_, i) => <SkeletonCard key={i} />)}
+        {activeTab === 'monitors' && (() => {
+          const sparkOpt = CHECK_RANGE_OPTS.find(o => o.id === sparklineRange)!
+          const sparklineLabel = `Last ${sparkOpt.label}`
+          return (
+            <>
+              {!loading && monitors.length > 0 && (
+                <HealthSummary monitors={monitors} incidents={incidents} timeRange={timeRange} />
+              )}
+
+              {/* Sparkline range selector */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                <div style={{ display: 'flex', gap: 2, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: 3 }}>
+                  {CHECK_RANGE_OPTS.map(opt => {
+                    const active = sparklineRange === opt.id
+                    return (
+                      <button key={opt.id} onClick={() => { setSparklineRange(opt.id); setDataLoading(true) }} style={{
+                        fontSize: 12, fontWeight: active ? 700 : 400, padding: '4px 12px',
+                        borderRadius: 'var(--r-sm)', border: 'none', cursor: 'pointer',
+                        background: active ? 'var(--orange-dim)' : 'transparent',
+                        color: active ? 'var(--orange)' : 'var(--tx-3)',
+                        whiteSpace: 'nowrap', transition: 'all .15s',
+                      }}>
+                        {opt.label}
+                      </button>
+                    )
+                  })}
+                </div>
+                <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>Click a card to inspect</span>
               </div>
-            ) : monitors.length === 0 ? (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '60px 20px', gap: 12, background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)' }}>
-                <Shield size={32} color="var(--tx-3)" aria-hidden />
-                <p style={{ fontSize: 14, color: 'var(--tx-3)', margin: 0 }}>No monitors configured yet.</p>
-              </div>
-            ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
-                {monitors.map(m => (
-                  <MonitorCard key={m.id} monitor={m} checks={checksByMonitor[m.id] ?? []} onClick={() => setExpandedMonitor(m)} />
-                ))}
-              </div>
-            )}
-          </>
-        )}
+
+              {loading ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                  {Array.from({ length: 6 }, (_, i) => <SkeletonCard key={i} />)}
+                </div>
+              ) : monitors.length === 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '60px 20px', gap: 12, background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)' }}>
+                  <Shield size={32} color="var(--tx-3)" aria-hidden />
+                  <p style={{ fontSize: 14, color: 'var(--tx-3)', margin: 0 }}>No monitors configured yet.</p>
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                  {monitors.map(m => (
+                    <MonitorCard
+                      key={m.id}
+                      monitor={m}
+                      checks={checksByMonitor[m.id] ?? []}
+                      onClick={() => setExpandedMonitor(m)}
+                      sparklineLabel={sparklineLabel}
+                      isLoading={dataLoading}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
+          )
+        })()}
 
         {/* ── Checks Tab ── */}
         {activeTab === 'checks' && (
@@ -1860,8 +2552,7 @@ export default function ServerHealthPage() {
             <FailedChecksSection
               monitors={monitors}
               failedChecks={failedChecks}
-              suppressedIds={suppressedWarnings}
-              onSuppress={suppress}
+              windowLabel={getWindowLabel(timeRange, customFrom, customTo)}
             />
           )
         )}
@@ -1873,11 +2564,7 @@ export default function ServerHealthPage() {
               {Array.from({ length: 2 }, (_, i) => <div key={i} className="skeleton" style={{ height: 80 }} />)}
             </div>
           ) : (
-            <PerformanceInsightsSection
-              monitors={monitors}
-              suppressedIds={suppressedWarnings}
-              onSuppress={suppress}
-            />
+            <PerformanceInsightsSection monitors={monitors} />
           )
         )}
 
@@ -1916,13 +2603,13 @@ export default function ServerHealthPage() {
                       </thead>
                       <tbody>
                         {pageSlice.map((inc, rowIdx) => {
-                          const isExpanded = expandedIncId === inc.id
+                          const isExpanded = expandedIncIds.has(inc.id)
                           const monName    = inc.monitors?.name ?? monitorNames[inc.monitor_id] ?? 'Unknown'
                           const isLast     = rowIdx === pageSlice.length - 1
                           return (
                             <React.Fragment key={inc.id}>
                               <tr
-                                onClick={() => setExpandedIncId(isExpanded ? null : inc.id)}
+                                onClick={() => toggleIncident(inc.id)}
                                 style={{ borderBottomWidth: isExpanded || !isLast ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', cursor: 'pointer', background: isExpanded ? 'var(--surface-2)' : undefined }}
                                 onMouseEnter={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)' }}
                                 onMouseLeave={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = '' }}
@@ -1968,7 +2655,7 @@ export default function ServerHealthPage() {
                                             ['Error Message',  inc.first_error_message ?? '—'],
                                             ['Concurrent Down', inc.concurrent_down_count != null ? `${inc.concurrent_down_count} monitor(s)` : '—'],
                                             ['Duration',       inc.is_open ? 'Still ongoing' : incidentDurationStr(inc)],
-                                            ['Resolved At',    inc.resolved_at ? new Date(inc.resolved_at).toLocaleString('en-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' }) : '—'],
+                                            ['Resolved At',    inc.resolved_at ? formatMYT(inc.resolved_at) : '—'],
                                           ].map(([label, val]) => (
                                             <div key={label} style={{ display: 'flex', gap: 6, fontSize: 12 }}>
                                               <dt style={{ color: 'var(--tx-3)', minWidth: 110, flexShrink: 0 }}>{label}:</dt>
@@ -2007,9 +2694,9 @@ export default function ServerHealthPage() {
                         {pageStart + 1}–{Math.min(pageStart + INC_PAGE_SIZE, incidents.length)} of {incidents.length} incidents
                       </span>
                       <div style={{ display: 'flex', gap: 8 }}>
-                        <button onClick={() => { setIncPage(p => p - 1); setExpandedIncId(null) }} disabled={incPage === 0} style={{ fontSize: 12, padding: '4px 14px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)', color: incPage === 0 ? 'var(--tx-3)' : 'var(--tx-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', cursor: incPage === 0 ? 'not-allowed' : 'pointer' }}>← Previous</button>
+                        <button onClick={() => setIncPage(p => p - 1)} disabled={incPage === 0} style={{ fontSize: 12, padding: '4px 14px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)', color: incPage === 0 ? 'var(--tx-3)' : 'var(--tx-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', cursor: incPage === 0 ? 'not-allowed' : 'pointer' }}>← Previous</button>
                         <span style={{ fontSize: 11, color: 'var(--tx-3)', alignSelf: 'center', padding: '0 4px' }}>{incPage + 1} / {totalPages}</span>
-                        <button onClick={() => { setIncPage(p => p + 1); setExpandedIncId(null) }} disabled={incPage >= totalPages - 1} style={{ fontSize: 12, padding: '4px 14px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)', color: incPage >= totalPages - 1 ? 'var(--tx-3)' : 'var(--tx-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', cursor: incPage >= totalPages - 1 ? 'not-allowed' : 'pointer' }}>Next →</button>
+                        <button onClick={() => setIncPage(p => p + 1)} disabled={incPage >= totalPages - 1} style={{ fontSize: 12, padding: '4px 14px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)', color: incPage >= totalPages - 1 ? 'var(--tx-3)' : 'var(--tx-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', cursor: incPage >= totalPages - 1 ? 'not-allowed' : 'pointer' }}>Next →</button>
                       </div>
                     </div>
                   )}
@@ -2020,7 +2707,173 @@ export default function ServerHealthPage() {
         })()}
 
 
+        {/* ── Anomalies Tab ── */}
+        {activeTab === 'anomalies' && (
+          <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+            <div style={{ padding: '14px 20px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--tx-1)', margin: 0 }}>Detected Anomalies</h2>
+              {!loading && anomalies.length > 0 && (
+                <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 10, background: 'var(--surface-2)', color: 'var(--tx-3)' }}>{anomalies.length}</span>
+              )}
+              <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>Last 30 days · click View Logs to fetch CloudWatch + AI diagnosis</span>
+            </div>
+            {loading ? (
+              <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {Array.from({ length: 5 }, (_, i) => <div key={i} className="skeleton" style={{ height: 12 }} />)}
+              </div>
+            ) : anomalies.length === 0 ? (
+              <div style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 13 }}>No anomalies detected in the last 30 days.</div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: 'var(--surface-2)' }}>
+                      {['Time (MYT)', 'Monitor', 'Type', 'Response', 'Ratio', 'HTTP', 'Error', 'Initial AI Diagnosis', 'Logs'].map(h => (
+                        <th key={h} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', whiteSpace: 'nowrap', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {anomalies.map((a, i) => {
+                      const isLast = i === anomalies.length - 1
+                      const isExpanded = expandedAnomalyId === a.id
+                      const logData = anomalyLogs[a.id]
+                      const typeColor = a.anomaly_type === 'spike'
+                        ? (a.spike_ratio != null
+                            ? a.spike_ratio >= 6 ? C.danger : a.spike_ratio >= 3 ? '#f97316' : C.warning
+                            : C.warning)
+                        : a.anomaly_type === 'down' ? C.danger : C.warning
+                      const typeBg     = a.anomaly_type === 'down' ? C.dangerBg : 'rgba(227,179,65,.12)'
+                      const typeBorder = a.anomaly_type === 'down' ? C.dangerBorder : 'rgba(227,179,65,.3)'
+                      const hasLogs    = !!a.cloudwatch_url
+                      return (
+                        <React.Fragment key={a.id}>
+                          <tr style={{ borderBottomWidth: isExpanded || !isLast ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', background: isExpanded ? 'rgba(59,130,246,.05)' : undefined }}
+                            onMouseEnter={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)' }}
+                            onMouseLeave={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = '' }}>
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11, color: 'var(--tx-2)' }}>
+                              {new Date(a.checked_at).toLocaleString('en-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })}
+                            </td>
+                            <td style={{ padding: '10px 14px', fontWeight: 600, color: 'var(--tx-1)', whiteSpace: 'nowrap' }}>{a.monitor_name}</td>
+                            <td style={{ padding: '10px 14px' }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, textTransform: 'uppercase', background: typeBg, color: typeColor, borderWidth: 1, borderStyle: 'solid', borderColor: typeBorder }}>
+                                {a.anomaly_type === 'spike' ? '⚡ spike' : a.anomaly_type === 'down' ? '✗ down' : '⚠ degraded'}
+                              </span>
+                            </td>
+                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap', color: typeColor, fontFamily: 'monospace', fontSize: 12, fontWeight: 600 }}>
+                              {a.response_time_ms != null ? `${a.response_time_ms}ms` : '—'}
+                              {a.avg_ms != null && <span style={{ color: 'var(--tx-3)', fontWeight: 400, marginLeft: 4 }}>/ {a.avg_ms}ms avg</span>}
+                            </td>
+                            <td style={{ padding: '10px 14px', color: a.spike_ratio != null ? typeColor : 'var(--tx-3)', fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap' }}>
+                              {a.spike_ratio != null ? `${a.spike_ratio.toFixed(1)}×` : '—'}
+                            </td>
+                            <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontSize: 12, color: a.status_code && a.status_code >= 500 ? C.danger : a.status_code && a.status_code >= 400 ? C.warning : 'var(--tx-2)' }}>
+                              {a.status_code ?? '—'}
+                            </td>
+                            <td style={{ padding: '10px 14px', maxWidth: 180 }}>
+                              {a.error_class && <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--tx-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.error_class}>{a.error_class}</div>}
+                              {a.error_message && <div style={{ fontSize: 11, color: 'var(--tx-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 2 }} title={a.error_message}>{a.error_message}</div>}
+                              {!a.error_class && !a.error_message && <span style={{ color: 'var(--tx-3)' }}>—</span>}
+                            </td>
+                            <td style={{ padding: '10px 14px', maxWidth: 240, minWidth: 160 }}>
+                              {a.ai_analysis
+                                ? <span style={{ fontSize: 12, color: 'var(--tx-2)', lineHeight: 1.45 }}>{a.ai_analysis}</span>
+                                : <span style={{ fontSize: 11, color: 'var(--tx-3)', fontStyle: 'italic' }}>Pending…</span>}
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
+                              {hasLogs ? (
+                                <button
+                                  onClick={() => {
+                                    const wasExpanded = expandedAnomalyId === a.id
+                                    setExpandedAnomalyId(wasExpanded ? null : a.id)
+                                    if (!wasExpanded) fetchAnomalyLogs(a)
+                                  }}
+                                  style={{
+                                    fontSize: 11, padding: '3px 10px', borderRadius: 'var(--r-sm)', whiteSpace: 'nowrap', cursor: 'pointer',
+                                    background: isExpanded ? 'rgba(59,130,246,.15)' : 'var(--surface-2)',
+                                    color: isExpanded ? '#60a5fa' : 'var(--tx-2)',
+                                    borderWidth: 1, borderStyle: 'solid',
+                                    borderColor: isExpanded ? 'rgba(59,130,246,.3)' : 'var(--border)',
+                                  }}
+                                >
+                                  {isExpanded ? 'Hide' : 'View Logs'}
+                                </button>
+                              ) : (
+                                <span style={{ color: 'var(--tx-3)', fontSize: 11 }}>—</span>
+                              )}
+                            </td>
+                          </tr>
+
+                          {/* Inline log viewer */}
+                          {isExpanded && (
+                            <tr style={{ borderBottomWidth: isLast ? 0 : 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', background: 'var(--surface-2)' }}>
+                              <td colSpan={9} style={{ padding: '16px 20px 20px' }}>
+                                {!logData || logData.loading ? (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                    <div style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 4 }}>Fetching CloudWatch logs and running AI analysis…</div>
+                                    {Array.from({ length: 5 }, (_, si) => (
+                                      <div key={si} className="skeleton" style={{ height: 10, maxWidth: `${85 - si * 10}%` }} />
+                                    ))}
+                                  </div>
+                                ) : logData.error ? (
+                                  <div style={{ color: C.danger, fontSize: 12 }}>⚠ {logData.error}</div>
+                                ) : (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                                    {/* AI diagnosis from actual logs */}
+                                    {logData.analysis ? (
+                                      <div style={{ background: 'rgba(59,130,246,.08)', borderWidth: 1, borderStyle: 'solid', borderColor: 'rgba(59,130,246,.2)', borderRadius: 'var(--r-md)', padding: '10px 14px' }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: '#60a5fa', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>AI Diagnosis (from CloudWatch logs)</div>
+                                        <p style={{ margin: 0, fontSize: 13, color: 'var(--tx-1)', lineHeight: 1.6 }}>{logData.analysis}</p>
+                                      </div>
+                                    ) : (
+                                      <div style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>
+                                        {logData.events.length === 0 ? 'No log events found — AI analysis skipped.' : 'AI analysis unavailable (check OPENROUTER_API_KEY).'}
+                                      </div>
+                                    )}
+                                    {/* Log lines */}
+                                    <div>
+                                      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
+                                        CloudWatch Logs · {logData.events.length} event{logData.events.length !== 1 ? 's' : ''} · ±2 min window around {new Date(a.checked_at).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' })} MYT
+                                      </div>
+                                      {logData.events.length === 0 ? (
+                                        <div style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No log events found in this ±2 min window. The log group may not have captured this request.</div>
+                                      ) : (
+                                        <pre style={{ margin: 0, padding: '12px 14px', background: '#0d1117', borderRadius: 'var(--r-md)', fontSize: 11, fontFamily: 'monospace', overflowX: 'auto', maxHeight: 300, overflowY: 'auto', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                          {logData.events.map((ev, ei) => {
+                                            const msg = ev.message ?? ''
+                                            const isErr  = /error|fatal|exception/i.test(msg)
+                                            const isWarn = /warn/i.test(msg)
+                                            const evTs   = ev.timestamp
+                                              ? new Date(ev.timestamp).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                                              : ''
+                                            return (
+                                              <div key={ei} style={{ color: isErr ? C.danger : isWarn ? C.warning : 'var(--tx-2)', marginBottom: 2 }}>
+                                                {evTs && <span style={{ color: 'var(--tx-3)', marginRight: 10, fontSize: 10, flexShrink: 0 }}>{evTs}</span>}
+                                                {msg}
+                                              </div>
+                                            )
+                                          })}
+                                        </pre>
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
       </div>
+
+        </div>{/* /dataLoading wrapper */}
 
       {/* Monitor detail panel */}
       {expandedMonitor && (
@@ -2029,6 +2882,7 @@ export default function ServerHealthPage() {
           incidents={incidents}
           monitorNames={monitorNames}
           onClose={() => setExpandedMonitor(null)}
+          initialChecks={checksByMonitor[expandedMonitor.id] ?? []}
         />
       )}
     </div>

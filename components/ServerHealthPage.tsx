@@ -274,16 +274,23 @@ function statusInfo(m: MonitorRow): { color: string; label: string; pulse: boole
   if (!m.status)  return { color: C.muted,   label: 'Unknown',     pulse: false }
   if (m.status === 'up')       return { color: C.success, label: 'Operational', pulse: false }
   if (m.status === 'degraded') return { color: C.warning, label: 'Degraded',    pulse: false }
+  if (m.last_error_class === 'timeout') return { color: C.warning, label: 'Slow / Timeout', pulse: false }
   return { color: C.danger, label: 'Down', pulse: true }
 }
 
 function computeOverallStatus(monitors: MonitorRow[]): { label: string; color: string; bg: string; border: string } {
   const enabled = monitors.filter(m => m.enabled)
   if (enabled.length === 0) return { label: 'No Monitors', color: C.muted, bg: C.mutedBg, border: C.mutedBorder }
-  const downCount     = enabled.filter(m => m.status === 'down').length
-  const degradedCount = enabled.filter(m => m.status === 'degraded').length
-  if (downCount > 0)     return { label: `${downCount} Service${downCount > 1 ? 's' : ''} Down`, color: C.danger,  bg: C.dangerBg,  border: C.dangerBorder }
-  if (degradedCount > 0) return { label: 'Performance Degraded',   color: C.warning, bg: C.warningBg, border: C.warningBorder }
+  // Timeouts are slow/degraded, not a hard outage — don't colour the status red for them
+  const hardDown      = enabled.filter(m => m.status === 'down' && m.last_error_class !== 'timeout').length
+  const degradedCount = enabled.filter(m => m.status === 'degraded' || (m.status === 'down' && m.last_error_class === 'timeout')).length
+  if (hardDown > 0) {
+    const isMinor = hardDown === 1 || hardDown <= Math.floor(enabled.length * 0.1)
+    const label = `${hardDown} Service${hardDown > 1 ? 's' : ''} Down`
+    if (isMinor) return { label, color: C.warning, bg: C.warningBg, border: C.warningBorder }
+    return { label, color: C.danger, bg: C.dangerBg, border: C.dangerBorder }
+  }
+  if (degradedCount > 0) return { label: 'Performance Degraded', color: C.warning, bg: C.warningBg, border: C.warningBorder }
   return { label: 'All Systems Operational', color: C.success, bg: C.successBg, border: C.successBorder }
 }
 
@@ -566,15 +573,22 @@ function MonitorCard({ monitor, checks, onClick, sparklineLabel, isLoading }: {
       </div>
 
       {/* Active incident banner */}
-      {hasActiveIncident && (
+      {hasActiveIncident && (() => {
+        const isTimeout = monitor.last_error_class === 'timeout'
+        const bg     = isTimeout ? C.warningBg  : C.dangerBg
+        const border = isTimeout ? C.warningBorder : C.dangerBorder
+        const color  = isTimeout ? C.warning    : C.danger
+        const icon   = isTimeout ? '🟡' : '🔴'
+        const label  = isTimeout ? 'Slow since' : 'Down since'
+        return (
         <div style={{
-          background: C.dangerBg,
-          borderWidth: 1, borderStyle: 'solid', borderColor: C.dangerBorder,
+          background: bg,
+          borderWidth: 1, borderStyle: 'solid', borderColor: border,
           borderRadius: 'var(--r-sm)', padding: '8px 12px',
           display: 'flex', flexDirection: 'column', gap: 4,
         }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: C.danger }}>
-            🔴 Down since {incidentAge(monitor.incident_started_at!)}
+          <div style={{ fontSize: 12, fontWeight: 700, color }}>
+            {icon} {label} {incidentAge(monitor.incident_started_at!)}
           </div>
           {monitor.incident_probable_cause && (
             <div style={{ fontSize: 11, color: 'var(--tx-2)' }}>{monitor.incident_probable_cause}</div>
@@ -590,7 +604,8 @@ function MonitorCard({ monitor, checks, onClick, sparklineLabel, isLoading }: {
             </div>
           )}
         </div>
-      )}
+        )
+      })()}
     </div>
   )
 }
@@ -743,8 +758,8 @@ function UptimeRing({ value, size = 130, sub = '7d avg uptime' }: { value: numbe
         style={{ fill: color, fontSize: `${Math.round(size / 6.5)}px`, fontWeight: 800 }}>
         {display}
       </text>
-      <text x="50%" y="62%" textAnchor="middle"
-        style={{ fill: '#7D8590', fontSize: `${Math.round(size / 10)}px` }}>
+      <text x="50%" y="64%" textAnchor="middle"
+        style={{ fill: '#7D8590', fontSize: `${Math.round(size / 14)}px` }}>
         {sub}
       </text>
     </svg>
@@ -803,14 +818,18 @@ function ResponseTimeBars({ monitors }: { monitors: MonitorRow[] }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
       {data.map(mon => {
         const ms = mon.avg_response_24h ?? 0
-        const threshold = isWebEndpoint(mon.name) ? 800 : 200
-        const color = ms >= threshold ? C.danger : ms >= threshold * 0.8 ? C.warning : C.success
+        // Use per-monitor degraded_threshold_ms to match n8n workflow's degraded detection
+        const threshold = mon.degraded_threshold_ms ?? (isWebEndpoint(mon.name) ? 800 : 200)
+        const color = ms >= threshold ? C.danger : ms >= threshold * 0.75 ? C.warning : C.success
         const pct = Math.max(3, (ms / maxMs) * 100)
+        const thresholdPct = Math.min(100, (threshold / maxMs) * 100)
         return (
           <div key={mon.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 11, color: 'var(--tx-2)', width: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 }}>{mon.name}</span>
-            <div style={{ flex: 1, height: 7, background: 'rgba(125,133,144,.15)', borderRadius: 4, overflow: 'hidden' }}>
+            <div style={{ flex: 1, height: 7, background: 'rgba(125,133,144,.15)', borderRadius: 4, overflow: 'hidden', position: 'relative' }}>
               <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 4, transition: 'width .5s ease' }} />
+              {/* Threshold marker */}
+              <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${thresholdPct}%`, width: 1, background: 'rgba(125,133,144,.5)' }} />
             </div>
             <span style={{ fontSize: 11, fontWeight: 700, color, width: 52, textAlign: 'right', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
               {Math.round(ms)}ms
@@ -914,7 +933,7 @@ function HealthSummary({ monitors, incidents, timeRange }: { monitors: MonitorRo
             label="Avg response"
             value={m.avgResponseMs !== null ? `${m.avgResponseMs}ms` : '—'}
             color={m.avgResponseMs !== null ? responseColor(m.avgResponseMs, null) : C.muted}
-            sub="healthy monitors only"
+            sub="service hours only"
           />
           {m.avgResolutionSec !== null && (
             <StatChip
@@ -990,13 +1009,44 @@ function FailedChecksSection({ monitors, failedChecks, windowLabel }: {
     return next
   })
 
+  type Run = { status: string; errorClass: string | null; count: number; firstTime: string; lastTime: string }
+  const groupRuns = (rows: FailedCheckRow[]): Run[] => {
+    const sorted = [...rows].sort((a, b) => new Date(a.checked_at).getTime() - new Date(b.checked_at).getTime())
+    const runs: Run[] = []
+    for (const c of sorted) {
+      const last = runs[runs.length - 1]
+      if (last && last.status === c.status && last.errorClass === (c.error_class ?? null)) {
+        last.count++; last.lastTime = c.checked_at
+      } else {
+        runs.push({ status: c.status, errorClass: c.error_class ?? null, count: 1, firstTime: c.checked_at, lastTime: c.checked_at })
+      }
+    }
+    return runs.reverse()
+  }
+
   return (
     <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden', marginBottom: 24 }}>
       <div style={{ padding: '14px 20px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
         <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--tx-1)', margin: 0 }}>Recent Failed Checks</h2>
-        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: C.dangerBg, color: C.danger, borderWidth: 1, borderStyle: 'solid', borderColor: C.dangerBorder }}>
-          {failedChecks.length} failures · {monitorIds.length} monitor{monitorIds.length !== 1 ? 's' : ''}
-        </span>
+        {(() => {
+          const downTotal     = failedChecks.filter(c => c.status === 'down').length
+          const degradedTotal = failedChecks.filter(c => c.status === 'degraded').length
+          return (
+            <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+              {downTotal > 0 && (
+                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: C.dangerBg, color: C.danger, borderWidth: 1, borderStyle: 'solid', borderColor: C.dangerBorder }}>
+                  {downTotal} down
+                </span>
+              )}
+              {degradedTotal > 0 && (
+                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: C.warningBg, color: C.warning, borderWidth: 1, borderStyle: 'solid', borderColor: C.warningBorder }}>
+                  {degradedTotal} degraded
+                </span>
+              )}
+              <span style={{ fontSize: 10, color: 'var(--tx-3)' }}>{monitorIds.length} monitor{monitorIds.length !== 1 ? 's' : ''}</span>
+            </div>
+          )
+        })()}
         <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>{windowLabel} — click a row to expand</span>
       </div>
 
@@ -1009,6 +1059,8 @@ function FailedChecksSection({ monitors, failedChecks, windowLabel }: {
         const errorCounts: Record<string, number> = {}
         for (const c of checks) { const k = c.error_class ?? 'unknown'; errorCounts[k] = (errorCounts[k] ?? 0) + 1 }
         const topErrors = Object.entries(errorCounts).sort((a, b) => b[1] - a[1]).slice(0, 3)
+        const downCount     = checks.filter(c => c.status === 'down').length
+        const degradedCount = checks.filter(c => c.status === 'degraded').length
 
         return (
           <div key={monId} style={{ borderBottomWidth: isLast && !isOpen ? 0 : 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>
@@ -1016,7 +1068,11 @@ function FailedChecksSection({ monitors, failedChecks, windowLabel }: {
               <button onClick={() => toggle(monId)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 12, padding: '12px 20px', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
                 <span style={{ fontSize: 10, color: 'var(--tx-3)', display: 'inline-block', width: 10, flexShrink: 0, transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>▶</span>
                 <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx-1)', minWidth: 140 }}>{name}</span>
-                <span style={{ fontSize: 12, color: C.danger, fontWeight: 600, flexShrink: 0 }}>{checks.length} failure{checks.length !== 1 ? 's' : ''}</span>
+                <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
+                  {downCount > 0 && <span style={{ fontSize: 12, color: C.danger, fontWeight: 600 }}>{downCount} down</span>}
+                  {downCount > 0 && degradedCount > 0 && <span style={{ fontSize: 12, color: 'var(--tx-3)' }}>·</span>}
+                  {degradedCount > 0 && <span style={{ fontSize: 12, color: C.warning, fontWeight: 600 }}>{degradedCount} degraded</span>}
+                </div>
                 <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', flex: 1 }}>
                   {topErrors.map(([ec, cnt]) => (
                     <span key={ec} style={{ fontSize: 10, padding: '1px 8px', borderRadius: 10, background: 'var(--surface-2)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', color: 'var(--tx-2)', whiteSpace: 'nowrap' }}>
@@ -1030,51 +1086,324 @@ function FailedChecksSection({ monitors, failedChecks, windowLabel }: {
               </button>
             </div>
 
-            {isOpen && (
-              <div style={{ borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--border)' }}>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                    <thead>
-                      <tr style={{ background: 'var(--surface-2)' }}>
-                        {['Time (MYT)', 'Status', 'HTTP', 'Error Type', 'Error Message', 'Response'].map(h => (
-                          <th key={h} style={{ padding: '8px 14px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em', whiteSpace: 'nowrap', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {checks.slice(0, 20).map((c, ci) => (
-                        <tr key={c.id} style={{ borderBottomWidth: ci < Math.min(checks.length, 20) - 1 ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>
-                          <td style={{ padding: '7px 14px', color: 'var(--tx-2)', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11 }}>
-                            {new Date(c.checked_at).toLocaleString('en-MY', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })}
-                          </td>
-                          <td style={{ padding: '7px 14px' }}>
-                            <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 6, background: c.status === 'down' ? C.dangerBg : C.warningBg, color: c.status === 'down' ? C.danger : C.warning, borderWidth: 1, borderStyle: 'solid', borderColor: c.status === 'down' ? C.dangerBorder : C.warningBorder, textTransform: 'uppercase' }}>
-                              {c.status}
-                            </span>
-                          </td>
-                          <td style={{ padding: '7px 14px', color: 'var(--tx-2)', fontFamily: 'monospace' }}>{c.status_code ?? '—'}</td>
-                          <td style={{ padding: '7px 14px', color: 'var(--tx-2)', whiteSpace: 'nowrap' }}>{errorLabel(c.error_class)}</td>
-                          <td style={{ padding: '7px 14px', color: 'var(--tx-3)', maxWidth: 300 }}>
-                            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.error_message ?? '—'}</div>
-                          </td>
-                          <td style={{ padding: '7px 14px', color: 'var(--tx-2)', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
-                            {c.response_time_ms !== null ? `${c.response_time_ms}ms` : '—'}
-                          </td>
+            {isOpen && (() => {
+              const runs = groupRuns(checks)
+              return (
+                <div style={{ borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--border)' }}>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: 'var(--surface-2)' }}>
+                          {['From (MYT)', 'To (MYT)', 'Status', 'Count', 'Error Type'].map(h => (
+                            <th key={h} style={{ padding: '8px 14px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em', whiteSpace: 'nowrap', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>{h}</th>
+                          ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {checks.length > 20 && (
-                  <div style={{ padding: '8px 20px', fontSize: 11, color: 'var(--tx-3)', textAlign: 'right', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--border)' }}>
-                    Showing 20 of {checks.length} failures in the last 24h
+                      </thead>
+                      <tbody>
+                        {runs.map((run, ri) => (
+                          <tr key={ri} style={{ borderBottomWidth: ri < runs.length - 1 ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>
+                            <td style={{ padding: '7px 14px', color: 'var(--tx-2)', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11 }}>
+                              {new Date(run.firstTime).toLocaleString('en-MY', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })}
+                            </td>
+                            <td style={{ padding: '7px 14px', color: run.count > 1 ? 'var(--tx-2)' : 'var(--tx-3)', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11 }}>
+                              {run.count > 1 ? new Date(run.lastTime).toLocaleString('en-MY', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' }) : '—'}
+                            </td>
+                            <td style={{ padding: '7px 14px' }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 6, background: run.status === 'down' ? C.dangerBg : C.warningBg, color: run.status === 'down' ? C.danger : C.warning, borderWidth: 1, borderStyle: 'solid', borderColor: run.status === 'down' ? C.dangerBorder : C.warningBorder, textTransform: 'uppercase' as const }}>
+                                {run.status}
+                              </span>
+                            </td>
+                            <td style={{ padding: '7px 14px', color: run.count > 1 ? C.danger : 'var(--tx-2)', fontWeight: run.count > 1 ? 700 : 400, fontFamily: 'monospace' }}>
+                              {run.count}×
+                            </td>
+                            <td style={{ padding: '7px 14px', color: 'var(--tx-2)', whiteSpace: 'nowrap' }}>
+                              {errorLabel(run.errorClass ?? 'unknown')}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-                )}
-              </div>
-            )}
+                  <div style={{ padding: '8px 20px', fontSize: 11, color: 'var(--tx-3)', textAlign: 'right', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--border)' }}>
+                    {checks.length} checks → {runs.length} run{runs.length !== 1 ? 's' : ''} in the last 24h
+                  </div>
+                </div>
+              )
+            })()}
           </div>
         )
       })}
+    </div>
+  )
+}
+
+// ─── Lighthouse Audit Section ─────────────────────────────────
+
+interface LighthouseResult {
+  url: string; fetchedAt: string
+  scores: { performance: number | null; accessibility: number | null; bestPractices: number | null; seo: number | null }
+  metrics: { fcp: number | null; lcp: number | null; tbt: number | null; cls: number | null; tti: number | null; speedIndex: number | null; ttfb: number | null }
+  opportunities: { id: string; title: string; savingsMs: number }[]
+  diagnostics: { id: string; title: string; description: string }[]
+}
+
+function scoreGrade(s: number | null): { color: string; label: string } {
+  if (s === null) return { color: C.muted, label: '?' }
+  if (s >= 90) return { color: C.success, label: 'Good' }
+  if (s >= 50) return { color: C.warning, label: 'Needs Work' }
+  return { color: C.danger, label: 'Poor' }
+}
+
+// Key is `${target}::${strategy}`
+type LHResults = Record<string, LighthouseResult | { error: string } | 'loading'>
+
+function ScoreBlock({ label, score }: { label: string; score: number | null }) {
+  const g = scoreGrade(score)
+  return (
+    <div style={{ textAlign: 'center', minWidth: 64 }}>
+      <div style={{ fontSize: 22, fontWeight: 800, color: g.color, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}>{score ?? '—'}</div>
+      <div style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 1 }}>{label}</div>
+      <div style={{ fontSize: 9, color: g.color, fontWeight: 700 }}>{g.label}</div>
+    </div>
+  )
+}
+
+function MetricChip({ label, val, good, poor, unit, title }: { label: string; val: number | null; good: number; poor: number; unit: string; title: string }) {
+  const color   = val === null ? C.muted : val <= good ? C.success : val <= poor ? C.warning : C.danger
+  const display = val !== null ? (unit === '' ? (val / 1000).toFixed(3) : `${val}${unit}`) : '—'
+  return (
+    <div title={title} style={{ padding: '4px 8px', borderRadius: 6, background: `${color}12`, border: `1px solid ${color}30`, cursor: 'help' }}>
+      <div style={{ fontSize: 9, color: 'var(--tx-3)', marginBottom: 1 }}>{label}</div>
+      <div style={{ fontSize: 12, fontWeight: 700, color, fontVariantNumeric: 'tabular-nums' }}>{display}</div>
+    </div>
+  )
+}
+
+function StrategyPane({ res, error, loading, strategy }: {
+  res: LighthouseResult | null; error: string | null; loading: boolean; strategy: 'desktop' | 'mobile'
+}) {
+  const icon  = strategy === 'mobile' ? '📱' : '🖥️'
+  const label = strategy === 'desktop' ? 'Desktop' : 'Mobile web (simulated Moto G4 · throttled 4G)'
+  return (
+    <div style={{ flex: '1 1 0', minWidth: 0, background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: '12px 14px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+        <span style={{ fontSize: 14 }}>{icon}</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx-1)' }}>{strategy === 'desktop' ? 'Desktop' : 'Mobile'}</span>
+        <span style={{ fontSize: 10, color: 'var(--tx-3)' }} title={label}>({strategy === 'mobile' ? 'web on simulated phone' : 'full desktop Chrome'})</span>
+      </div>
+      {loading && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#60a5fa' }}>
+          <span className="anim-spin" style={{ display: 'inline-block' }}>⟳</span> Running Lighthouse…
+        </div>
+      )}
+      {error && <div style={{ fontSize: 11, color: C.danger }}>{error}</div>}
+      {res && (
+        <>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+            <ScoreBlock label="Performance"   score={res.scores.performance} />
+            <ScoreBlock label="Accessibility" score={res.scores.accessibility} />
+            <ScoreBlock label="Best Practices" score={res.scores.bestPractices} />
+            <ScoreBlock label="SEO"           score={res.scores.seo} />
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: res.opportunities.length > 0 ? 10 : 0 }}>
+            <MetricChip label="FCP"  val={res.metrics.fcp}   good={1800} poor={3000} unit="ms" title="First Contentful Paint — time until first text/image appears" />
+            <MetricChip label="LCP"  val={res.metrics.lcp}   good={2500} poor={4000} unit="ms" title="Largest Contentful Paint — time until main content loads" />
+            <MetricChip label="TBT"  val={res.metrics.tbt}   good={200}  poor={600}  unit="ms" title="Total Blocking Time — JS blocking the main thread" />
+            <MetricChip label="CLS"  val={res.metrics.cls !== null ? res.metrics.cls * 1000 : null} good={100} poor={250} unit="" title="Cumulative Layout Shift (×10⁻³) — visual stability" />
+            <MetricChip label="TTI"  val={res.metrics.tti}   good={3800} poor={7300} unit="ms" title="Time to Interactive — when page is fully usable" />
+            <MetricChip label="TTFB" val={res.metrics.ttfb}  good={800}  poor={1800} unit="ms" title="Time to First Byte — server response speed" />
+          </div>
+          {res.opportunities.length > 0 && (
+            <div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 5 }}>Opportunities</div>
+              {res.opportunities.map(op => (
+                <div key={op.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
+                  <span style={{ fontSize: 11, color: 'var(--tx-1)', flex: 1 }}>{op.title}</span>
+                  <span style={{ fontSize: 10, color: C.warning, fontWeight: 600 }}>−{op.savingsMs}ms</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ fontSize: 9, color: 'var(--tx-3)', marginTop: 8 }}>
+            {new Date(res.fetchedAt).toLocaleString('en-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })} MYT · Google PageSpeed Insights
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// Public pages sourced from landing-routing.module.ts (YZ-WEB-PG-001 → PG-019).
+// Authenticated routes (user/**, institution/**, etc.) are excluded — Lighthouse
+// cannot audit pages behind login. Dynamic-ID routes (/public/job/:id) are also excluded.
+const ALL_WEB_ROUTES: { label: string; path: string }[] = [
+  { label: 'Homepage',                    path: '/' },
+  { label: 'Login',                       path: '/login' },
+  { label: 'Sign Up',                     path: '/sign-up' },
+  { label: 'Forgot Password',             path: '/forgot-password' },
+  { label: 'Reset Password',              path: '/reset-password' },
+  { label: 'Guest Profile Setup',         path: '/guest-profile-setup' },
+  { label: 'Build My Plan',              path: '/build-my-plan' },
+  { label: 'Request Offer (RMO)',         path: '/request-offer-rmo' },
+  { label: 'Guest Apply Application',     path: '/guest-entry-apply-application' },
+  { label: 'Guest Application Landing',   path: '/guest-application-landing' },
+  { label: 'Browse Courses (Guest)',      path: '/guest-courses' },
+  { label: 'Browse Jobs (Guest)',         path: '/guest-jobs' },
+  { label: 'About',                       path: '/about' },
+  { label: 'Contact',                    path: '/contact' },
+  { label: 'Cookie Policy',              path: '/cookies' },
+  { label: 'Privacy Policy',             path: '/privacy' },
+  { label: 'Terms',                      path: '/terms' },
+]
+
+function LighthouseAuditSection({ monitors }: { monitors: MonitorRow[] }) {
+  const webMonitors = monitors.filter(m => m.enabled && isWebEndpoint(m.name) && m.target?.startsWith('http'))
+  const [results, setResults] = useState<LHResults>({})
+  const [runningAll, setRunningAll] = useState(false)
+  const [mode, setMode] = useState<'monitors' | 'all'>('monitors')
+  const [baseUrl, setBaseUrl] = useState('')
+
+  const defaultBase = (() => {
+    if (!webMonitors.length) return ''
+    try { return new URL(webMonitors[0].target).origin } catch { return '' }
+  })()
+
+  const effectiveBase = baseUrl || defaultBase
+
+  const items: { name: string; target: string }[] = mode === 'monitors'
+    ? webMonitors.map(m => ({ name: m.name, target: m.target }))
+    : ALL_WEB_ROUTES.map(r => ({ name: r.label, target: effectiveBase + r.path }))
+
+  const lhKey = (target: string, strategy: string) => `${target}::${strategy}`
+
+  const runAudit = useCallback(async (target: string) => {
+    setResults(prev => ({ ...prev, [lhKey(target, 'desktop')]: 'loading', [lhKey(target, 'mobile')]: 'loading' }))
+    await Promise.all((['desktop', 'mobile'] as const).map(async strategy => {
+      try {
+        const res  = await fetch(`/api/lighthouse?url=${encodeURIComponent(target)}&strategy=${strategy}`)
+        const data = await res.json()
+        setResults(prev => ({ ...prev, [lhKey(target, strategy)]: data }))
+      } catch {
+        setResults(prev => ({ ...prev, [lhKey(target, strategy)]: { error: 'Network error' } }))
+      }
+    }))
+  }, [])
+
+  const runAll = useCallback(async () => {
+    setRunningAll(true)
+    for (const item of items) { if (item.target) await runAudit(item.target) }
+    setRunningAll(false)
+  }, [items, runAudit])
+
+  const getResult = (target: string, strategy: string) => {
+    const r = results[lhKey(target, strategy)]
+    return {
+      loading: r === 'loading',
+      error:   r && r !== 'loading' && 'error' in r ? (r as { error: string }).error : null,
+      res:     r && r !== 'loading' && !('error' in r) ? r as LighthouseResult : null,
+    }
+  }
+
+  return (
+    <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden', marginBottom: 24 }}>
+      {/* Header */}
+      <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--tx-1)', margin: 0 }}>Lighthouse Audits</h2>
+        <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>
+          Desktop + Mobile · Performance · Accessibility · Best Practices · SEO · Core Web Vitals
+        </span>
+        <span
+          style={{ fontSize: 11, color: 'var(--tx-3)', padding: '2px 8px', borderRadius: 20, background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+          title="Mobile = your web app tested in Chrome with Moto G4 device emulation and throttled 4G network. Not the native iOS/Android app."
+        >
+          ⓘ Mobile = web on simulated phone
+        </span>
+
+        {/* Mode toggle */}
+        <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border)', flexShrink: 0 }}>
+          {(['monitors', 'all'] as const).map(m => (
+            <button key={m} onClick={() => setMode(m)} style={{
+              padding: '3px 11px', fontSize: 11, fontWeight: mode === m ? 700 : 400,
+              background: mode === m ? '#3b82f6' : 'var(--surface-2)',
+              color: mode === m ? '#fff' : 'var(--tx-3)',
+              border: 'none', cursor: 'pointer', whiteSpace: 'nowrap',
+            }}>
+              {m === 'monitors' ? 'Monitored endpoints' : 'All pages'}
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={runAll}
+          disabled={runningAll || (mode === 'all' && !effectiveBase)}
+          style={{
+            marginLeft: 'auto', fontSize: 11, padding: '4px 12px', borderRadius: 6,
+            cursor: runningAll ? 'default' : 'pointer',
+            background: '#3b82f6', color: '#fff', border: 'none',
+            opacity: runningAll || (mode === 'all' && !effectiveBase) ? 0.6 : 1,
+            display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0,
+          }}
+        >
+          {runningAll && <span className="anim-spin" style={{ display: 'inline-block' }}>⟳</span>}
+          Audit all ({items.length})
+        </button>
+      </div>
+
+      {/* All-pages base URL row */}
+      {mode === 'all' && (
+        <div style={{ padding: '10px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, background: 'var(--surface-2)' }}>
+          <span style={{ fontSize: 11, color: 'var(--tx-3)', flexShrink: 0 }}>Base URL:</span>
+          <input
+            value={baseUrl}
+            onChange={e => setBaseUrl(e.target.value.replace(/\/$/, ''))}
+            placeholder={defaultBase || 'https://yuzee.com'}
+            style={{
+              flex: 1, maxWidth: 340, padding: '5px 9px', fontSize: 12,
+              background: 'var(--surface-1)', border: '1px solid var(--border)',
+              borderRadius: 6, color: 'var(--tx-1)', outline: 'none',
+            }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{items.length} pages will be audited</span>
+        </div>
+      )}
+
+      {/* Items list */}
+      <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {items.length === 0 ? (
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--tx-3)', fontSize: 13 }}>
+            No web endpoints configured. Add monitors with HTTP targets to audit them here.
+          </div>
+        ) : items.map(item => {
+          const desktop = getResult(item.target, 'desktop')
+          const mobile  = getResult(item.target, 'mobile')
+          const hasAny  = desktop.res || mobile.res || desktop.loading || mobile.loading
+          return (
+            <div key={item.target} style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: '14px 16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: hasAny ? 12 : 0, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--tx-1)' }}>{item.name}</span>
+                <span style={{ fontSize: 11, color: 'var(--tx-3)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.target}</span>
+                <button
+                  onClick={() => runAudit(item.target)}
+                  disabled={!item.target || desktop.loading || mobile.loading}
+                  style={{
+                    fontSize: 11, padding: '3px 10px', borderRadius: 6, cursor: 'pointer',
+                    background: 'var(--surface-1)', color: '#3b82f6', border: '1px solid var(--border)',
+                    opacity: desktop.loading || mobile.loading ? 0.5 : 1,
+                  }}
+                >
+                  {hasAny ? 'Re-audit' : 'Audit →'}
+                </button>
+              </div>
+              {hasAny && (
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                  <StrategyPane strategy="desktop" {...desktop} />
+                  <StrategyPane strategy="mobile"  {...mobile} />
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -1084,7 +1413,8 @@ function FailedChecksSection({ monitors, failedChecks, windowLabel }: {
 function PerformanceInsightsSection({ monitors }: { monitors: MonitorRow[] }) {
   const slow = monitors.filter(m => {
     if (!m.avg_response_24h || !m.enabled) return false
-    return m.avg_response_24h >= (isWebEndpoint(m.name) ? 800 : 200)
+    const threshold = m.degraded_threshold_ms ?? (isWebEndpoint(m.name) ? 800 : 200)
+    return m.avg_response_24h >= threshold
   })
   if (slow.length === 0) return null
 
@@ -1100,12 +1430,13 @@ function PerformanceInsightsSection({ monitors }: { monitors: MonitorRow[] }) {
           const p95  = m.p95_response_24h !== null ? Math.round(m.p95_response_24h) : null
           const web  = isWebEndpoint(m.name)
           const table = web ? WEB_PERCENTILES : API_PERCENTILES
-          const benchmark = web ? 800 : 200
-          const scale     = web ? 3000 : 800
+          // Use per-monitor degraded_threshold_ms to match n8n workflow degraded detection
+          const benchmark = m.degraded_threshold_ms ?? (web ? 800 : 200)
+          const scale     = web ? 3000 : Math.max(800, benchmark * 2)
           const pct       = interpolatePercentile(avg, table)
           const barPct    = Math.min(100, (avg / scale) * 100)
           const bmPct     = Math.min(100, (benchmark / scale) * 100)
-          const barColor  = avg > benchmark * 2.25 ? C.danger : C.warning
+          const barColor  = avg > benchmark * 2 ? C.danger : C.warning
           const reasons   = getSlownessReasons(m, web)
 
           return (
@@ -1159,18 +1490,29 @@ function PerformanceInsightsSection({ monitors }: { monitors: MonitorRow[] }) {
 
 // ─── Monitor Detail Panel ─────────────────────────────────────
 
-function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose, initialChecks }: {
+function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose, initialChecks, anomalies, onNavigateToIncident }: {
   monitor: MonitorRow
   incidents: IncidentRow[]
   monitorNames: Record<string, string>
   onClose: () => void
   initialChecks: CheckRow[]
+  anomalies: AnomalyRow[]
+  onNavigateToIncident: (id: string) => void
 }) {
   const supabase = useMemo(() => createClient(), [])
   const info = statusInfo(monitor)
   const monitorIncidents = incidents.filter(i => i.monitor_id === monitor.id)
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const [checkRange, setCheckRange] = useState<CheckRange>('1h')
+
+  // Map checked_at → stored anomaly (for inline AI diagnosis without requiring CloudWatch)
+  const anomalyByCheckedAt = useMemo(() => {
+    const map: Record<string, AnomalyRow> = {}
+    for (const a of anomalies) {
+      if (a.monitor_id === monitor.id) map[a.checked_at] = a
+    }
+    return map
+  }, [anomalies, monitor.id])
   const [panelChecks, setPanelChecks] = useState<CheckRow[]>(initialChecks)
   const [loadingChecks, setLoadingChecks] = useState(false)
   const [expandedLogKey, setExpandedLogKey] = useState<string | null>(null)
@@ -1393,6 +1735,13 @@ function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose, initial
                                 {c.error_message}
                               </div>
                             )}
+                            {/* Stored AI diagnosis from monitor_anomalies — shown without needing to open CloudWatch */}
+                            {anomalyByCheckedAt[c.checked_at]?.ai_analysis && !logCache[c.checked_at]?.analysis && (
+                              <div style={{ marginTop: 5, padding: '5px 8px', borderRadius: 'var(--r-sm)', background: 'rgba(59,130,246,.08)', border: '1px solid rgba(59,130,246,.18)', fontSize: 10, color: 'var(--tx-1)', lineHeight: 1.5 }}>
+                                <span style={{ fontSize: 9, fontWeight: 700, color: '#60a5fa', textTransform: 'uppercase', letterSpacing: '.07em', display: 'block', marginBottom: 2 }}>AI Diagnosis</span>
+                                {anomalyByCheckedAt[c.checked_at].ai_analysis}
+                              </div>
+                            )}
                             {hasLogs && (
                               <button
                                 onClick={() => {
@@ -1542,11 +1891,18 @@ function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose, initial
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {monitorIncidents.map(inc => (
-                  <div key={inc.id} style={{
-                    background: 'var(--surface-2)',
-                    borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)',
-                    borderRadius: 'var(--r-md)', padding: '10px 14px',
-                  }}>
+                  <div
+                    key={inc.id}
+                    onClick={() => onNavigateToIncident(inc.id)}
+                    style={{
+                      background: 'var(--surface-2)',
+                      borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)',
+                      borderRadius: 'var(--r-md)', padding: '10px 14px',
+                      cursor: 'pointer', transition: 'background .12s',
+                    }}
+                    onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--surface-3, rgba(255,255,255,.05))'}
+                    onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)'}
+                  >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                       <span
                         className={inc.is_open ? 'anim-pulse' : undefined}
@@ -1562,6 +1918,7 @@ function MonitorDetailPanel({ monitor, incidents, monitorNames, onClose, initial
                     <div style={{ fontSize: 11, color: 'var(--tx-2)' }}>
                       {inc.probable_cause ?? inc.first_error_class ?? 'Unknown cause'}
                     </div>
+                    <div style={{ fontSize: 10, color: '#3b82f6', marginTop: 4, fontWeight: 600 }}>View in Incidents tab →</div>
                     {/* Use monitorNames map as fallback for the panel title */}
                     {inc.monitor_id !== monitor.id && (
                       <div style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 2 }}>
@@ -1622,7 +1979,7 @@ function SkeletonCard() {
 
 // ─── Tab Types & Bar ─────────────────────────────────────────
 
-type HealthTab = 'overview' | 'monitors' | 'checks' | 'performance' | 'incidents' | 'anomalies'
+type HealthTab = 'overview' | 'monitors' | 'checks' | 'performance' | 'lighthouse' | 'incidents' | 'anomalies'
 
 type TimeRange = 'today' | '7d' | '30d' | '60d' | 'all' | 'custom'
 
@@ -1679,6 +2036,7 @@ function TabBar({ active, onChange, badges }: {
     { id: 'monitors',    label: 'Monitors' },
     { id: 'checks',      label: 'Failed Checks' },
     { id: 'performance', label: 'Performance' },
+    { id: 'lighthouse',  label: 'Lighthouse' },
     { id: 'incidents',   label: 'Incidents' },
     { id: 'anomalies',   label: 'Anomalies' },
   ]
@@ -1719,20 +2077,31 @@ function DownServicesPopover({ monitors, onSelect, onClose }: {
   onSelect: (m: MonitorRow) => void
   onClose: () => void
 }) {
+  const hardDownCount = monitors.filter(m => m.status === 'down' && m.last_error_class !== 'timeout').length
+  const slowCount     = monitors.filter(m => m.last_error_class === 'timeout' || m.status === 'degraded').length
+  const headerLabel   = hardDownCount > 0 && slowCount > 0
+    ? `${hardDownCount} Down · ${slowCount} Slow`
+    : hardDownCount > 0
+      ? `${hardDownCount} Service${hardDownCount !== 1 ? 's' : ''} Down`
+      : `${slowCount} Service${slowCount !== 1 ? 's' : ''} Slow`
+  const headerColor   = hardDownCount > 0 ? C.danger  : C.warning
+  const borderColor   = hardDownCount > 0 ? C.dangerBorder : C.warningBorder
+  const dotClass      = hardDownCount > 0 ? 'anim-pulse' : ''
+
   return (
     <>
       <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
       <div style={{
         position: 'absolute', top: 'calc(100% + 6px)', right: 0,
         background: 'var(--surface-1)',
-        borderWidth: 1, borderStyle: 'solid', borderColor: C.dangerBorder,
+        borderWidth: 1, borderStyle: 'solid', borderColor: borderColor,
         borderRadius: 'var(--r-lg)', boxShadow: 'var(--shadow-lg)',
         zIndex: 41, minWidth: 290, overflow: 'hidden',
       }}>
         <div style={{ padding: '8px 14px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span className="anim-pulse" style={{ width: 7, height: 7, borderRadius: '50%', background: C.danger, flexShrink: 0 }} />
-          <span style={{ fontSize: 11, fontWeight: 700, color: C.danger, textTransform: 'uppercase', letterSpacing: '.06em' }}>
-            {monitors.length} Service{monitors.length !== 1 ? 's' : ''} Down
+          <span className={dotClass} style={{ width: 7, height: 7, borderRadius: '50%', background: headerColor, flexShrink: 0 }} />
+          <span style={{ fontSize: 11, fontWeight: 700, color: headerColor, textTransform: 'uppercase', letterSpacing: '.06em' }}>
+            {headerLabel}
           </span>
         </div>
         {monitors.map((m, i) => (
@@ -1740,14 +2109,17 @@ function DownServicesPopover({ monitors, onSelect, onClose }: {
             style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: 'none', cursor: 'pointer', textAlign: 'left', borderBottomWidth: i < monitors.length - 1 ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}
             onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)'}
             onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = ''}>
-            <span className="anim-pulse" style={{ width: 8, height: 8, borderRadius: '50%', background: C.danger, flexShrink: 0 }} />
+            <span className={m.last_error_class === 'timeout' ? '' : 'anim-pulse'} style={{ width: 8, height: 8, borderRadius: '50%', background: m.last_error_class === 'timeout' ? C.warning : C.danger, flexShrink: 0 }} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx-1)' }}>{m.name}</div>
               <div style={{ fontSize: 11, color: 'var(--tx-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {m.incident_started_at ? `Down since ${incidentAge(m.incident_started_at)}` : 'Currently down'} · {m.target}
+                {m.last_error_class === 'timeout'
+                  ? (m.incident_started_at ? `Slow since ${incidentAge(m.incident_started_at)}` : 'Currently slow')
+                  : (m.incident_started_at ? `Down since ${incidentAge(m.incident_started_at)}` : 'Currently down')
+                } · {m.target}
               </div>
             </div>
-            <span style={{ fontSize: 10, color: C.danger, fontWeight: 600, flexShrink: 0 }}>View →</span>
+            <span style={{ fontSize: 10, color: (m.last_error_class === 'timeout' || m.status === 'degraded') ? C.warning : C.danger, fontWeight: 600, flexShrink: 0 }}>View →</span>
           </button>
         ))}
       </div>
@@ -1917,13 +2289,13 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, timeRange, on
   const m = useMemo(() => computeMetrics(monitors, incidents), [monitors, incidents])
   const bullets = useMemo(() => buildBullets(m), [m])
 
-  // Pick the pre-computed uptime column that best matches the selected time range
   const uptimeField: keyof MonitorRow =
     timeRange === 'today' ? 'uptime_24h' :
     timeRange === '7d'    ? 'uptime_7d'  : 'uptime_30d'
   const uptimeLabel =
     timeRange === 'today' ? '24h avg uptime' :
     timeRange === '7d'    ? '7d avg uptime'  : '30d avg uptime'
+
   const activeScore = useMemo(() => {
     const enabled = monitors.filter(mon => mon.enabled)
     const withData = enabled.filter(mon => mon[uptimeField] !== null)
@@ -1931,7 +2303,6 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, timeRange, on
     return withData.reduce((sum, mon) => sum + ((mon[uptimeField] as number) ?? 0), 0) / withData.length
   }, [monitors, uptimeField])
 
-  // Failed check groups
   const byMonitor = useMemo(() => {
     const map: Record<string, FailedCheckRow[]> = {}
     for (const fc of failedChecks) {
@@ -1942,181 +2313,232 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, timeRange, on
   }, [failedChecks])
   const failMonitorIds   = Object.keys(byMonitor)
   const visibleFailCount = failedChecks.length
+  // Distinguish monitors that are STILL failing vs those that recovered
+  const currentlyUnhealthyIds = new Set(monitors.filter(mon => mon.enabled && mon.status !== 'up').map(mon => mon.id))
+  const stillFailingCount  = failMonitorIds.filter(id => currentlyUnhealthyIds.has(id)).length
+  const recoveredCount     = failMonitorIds.length - stillFailingCount
 
-  // Slow monitors
   const slowCount = monitors.filter(mon => {
     if (!mon.avg_response_24h || !mon.enabled) return false
-    return mon.avg_response_24h >= (isWebEndpoint(mon.name) ? 800 : 200)
+    const threshold = mon.degraded_threshold_ms ?? (isWebEndpoint(mon.name) ? 800 : 200)
+    return mon.avg_response_24h >= threshold
   }).length
 
-  const score   = activeScore
-  const sColor  = score !== null ? scoreColor(score) : C.muted
-  const sLabel  = score !== null ? scoreLabel(score) : 'Unknown'
+  const score  = activeScore
+  const sColor = score !== null ? scoreColor(score) : C.muted
+  const sLabel = score !== null ? scoreLabel(score) : 'Unknown'
   const statusSummary = [
     m.up.length > 0       && `${m.up.length} up`,
     m.down.length > 0     && `${m.down.length} down`,
     m.degraded.length > 0 && `${m.degraded.length} degraded`,
   ].filter(Boolean).join(' · ')
 
-  const CARD_BTN = (borderColor: string) => ({
-    background: 'var(--surface-1)' as const,
-    borderWidth: 1, borderStyle: 'solid' as const, borderColor,
+  // Recent activity feed — last 6 notable events (incidents + unique failed checks)
+  const recentEvents = useMemo(() => {
+    type Ev = { time: string; label: string; sub: string; color: string; icon: string; resolved: boolean }
+    const evts: Ev[] = []
+    incidents.slice(0, 5).forEach(inc => {
+      evts.push({
+        time:     inc.started_at,
+        label:    inc.monitors?.name ?? 'Monitor',
+        sub:      inc.probable_cause ?? inc.first_error_class ?? 'Incident',
+        color:    inc.is_open ? C.danger : C.muted,
+        icon:     inc.is_open ? '●' : '○',
+        resolved: !inc.is_open,
+      })
+    })
+    const seen = new Set<string>()
+    for (const fc of failedChecks) {
+      if (seen.has(fc.monitor_id)) continue
+      seen.add(fc.monitor_id)
+      const mon = monitors.find(mm => mm.id === fc.monitor_id)
+      evts.push({
+        time:     fc.checked_at,
+        label:    mon?.name ?? 'Monitor',
+        sub:      fc.error_class ?? fc.status,
+        color:    fc.status === 'down' ? C.danger : C.warning,
+        icon:     fc.status === 'down' ? '✕' : '▲',
+        resolved: mon?.status === 'up',
+      })
+    }
+    return evts.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 6)
+  }, [incidents, failedChecks, monitors])
+
+  const ISSUE_CARD = (borderColor: string) => ({
+    background:   'var(--surface-1)' as const,
+    borderWidth:  1, borderStyle: 'solid' as const, borderColor,
     borderRadius: 'var(--r-lg)', padding: '16px 20px',
-    cursor: 'pointer' as const, textAlign: 'left' as const,
-    display: 'flex', flexDirection: 'column' as const, gap: 4,
-    transition: 'box-shadow .15s',
+    cursor:       'pointer' as const, textAlign: 'left' as const,
+    display:      'flex', flexDirection: 'column' as const, gap: 4,
+    transition:   'box-shadow .15s, transform .12s',
+    flex:         '1 1 160px',
   })
 
+  const enabledMons = monitors.filter(mon => mon.enabled)
+  const sortedMons  = [...enabledMons].sort((a, b) => {
+    const rank = (r: MonitorRow) => r.status === 'down' ? 0 : r.status === 'degraded' ? 1 : 2
+    return rank(a) - rank(b) || a.name.localeCompare(b.name)
+  })
+  const hasResponseData = monitors.some(mon => mon.enabled && mon.avg_response_24h !== null && (mon.avg_response_24h as number) < 9500)
+
+  // Compact inline stat chip helper
+  const IChip = ({ label, value, color, sub, onClick }: { label: string; value: string; color: string; sub: string; onClick?: () => void }) => (
+    <button
+      onClick={onClick}
+      style={{
+        display: 'flex', flexDirection: 'column', gap: 1, padding: '8px 14px',
+        background: 'none', border: 'none', cursor: onClick ? 'pointer' : 'default',
+        borderLeft: '1px solid var(--border)', textAlign: 'left',
+        transition: 'background .12s',
+      }}
+      onMouseEnter={e => { if (onClick) (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)' }}
+      onMouseLeave={e => { if (onClick) (e.currentTarget as HTMLElement).style.background = 'none' }}
+    >
+      <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', whiteSpace: 'nowrap' }}>{label}</span>
+      <span style={{ fontSize: 20, fontWeight: 800, color, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}>{value}</span>
+      <span style={{ fontSize: 10, color: 'var(--tx-3)', whiteSpace: 'nowrap' }}>{sub}</span>
+    </button>
+  )
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
-      {/* ── Hero: Uptime ring + Monitor status grid ── */}
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'auto 1fr',
-        background: 'var(--surface-1)',
-        border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden',
-      }}>
-        {/* Left: uptime ring */}
-        <div style={{
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          gap: 10, padding: '24px 28px',
-          borderRight: '1px solid var(--border)',
-          background: score !== null && score >= 99 ? `${C.success}08` : score !== null && score < 95 ? `${C.danger}06` : undefined,
-        }}>
-          {loading ? (
-            <div className="skeleton" style={{ width: 140, height: 140, borderRadius: '50%' }} />
-          ) : (
-            <UptimeRing value={score} size={140} sub={uptimeLabel} />
-          )}
-          <span style={{
-            fontSize: 11, fontWeight: 700, padding: '3px 14px', borderRadius: 20,
-            background: sColor + '18', color: sColor, border: `1px solid ${sColor}40`,
+      {/* ── Hero card: ring + monitor pills + inline stats ── */}
+      <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+        {/* Top row: ring + pills */}
+        <div style={{ display: 'flex', flexWrap: 'wrap' }}>
+          {/* Uptime ring — compact */}
+          <div style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            gap: 6, padding: '14px 20px', minWidth: 148,
+            borderRight: '1px solid var(--border)',
+            background: score !== null && score >= 99
+              ? `radial-gradient(ellipse at 50% 70%, ${C.success}14 0%, transparent 70%)`
+              : score !== null && score < 95
+                ? `radial-gradient(ellipse at 50% 70%, ${C.danger}12 0%, transparent 70%)`
+                : undefined,
           }}>
-            {sLabel}
-          </span>
-        </div>
+            {loading
+              ? <div className="skeleton" style={{ width: 110, height: 110, borderRadius: '50%' }} />
+              : <UptimeRing value={score} size={110} sub={uptimeLabel} />
+            }
+            {loading
+              ? <div className="skeleton" style={{ width: 64, height: 18, borderRadius: 10 }} />
+              : <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 10px', borderRadius: 10, background: sColor + '18', color: sColor, border: `1px solid ${sColor}40` }}>{sLabel}</span>
+            }
+          </div>
 
-        {/* Right: monitor grid + stats */}
-        <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-              <p style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Monitor Status</p>
+          {/* Monitor pills */}
+          <div style={{ flex: 1, padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 8, minWidth: 200 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Monitor Status</span>
               {!loading && <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{m.enabled.length} active · {statusSummary || 'all up'}</span>}
             </div>
-            {loading ? (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
-                {Array.from({ length: 6 }, (_, i) => <div key={i} className="skeleton" style={{ height: 30, width: 110, borderRadius: 20 }} />)}
+            {loading
+              ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{Array.from({ length: 8 }, (_, i) => <div key={i} className="skeleton" style={{ height: 26, width: 100, borderRadius: 20 }} />)}</div>
+              : <MonitorStatusGrid monitors={monitors} onOpenMonitor={onOpenMonitor} />
+            }
+          </div>
+        </div>
+
+        {/* Inline stats strip — zero extra height */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', borderTop: '1px solid var(--border)', alignItems: 'stretch' }}>
+          {loading ? (
+            <div style={{ display: 'flex', gap: 12, padding: '10px 16px' }}>
+              {Array.from({ length: 5 }, (_, i) => <div key={i} className="skeleton" style={{ height: 44, width: 90, borderRadius: 'var(--r-sm)' }} />)}
+            </div>
+          ) : (
+            <>
+              <IChip
+                label="Failed checks"
+                value={String(failMonitorIds.length)}
+                color={stillFailingCount > 0 ? C.danger : failMonitorIds.length > 0 ? C.warning : C.muted}
+                sub={stillFailingCount > 0
+                  ? `${stillFailingCount} still failing · ${recoveredCount} recovered`
+                  : failMonitorIds.length > 0 ? `All ${failMonitorIds.length} recovered` : 'None today'
+                }
+                onClick={() => onNavigate('checks')}
+              />
+              <IChip label="Slow monitors" value={String(slowCount)} color={slowCount > 0 ? C.warning : C.muted} sub={slowCount > 0 ? 'above threshold' : 'All fast'} onClick={() => onNavigate('performance')} />
+              <IChip label="Open incidents" value={String(m.openIncidents.length)} color={m.openIncidents.length > 0 ? C.danger : C.muted} sub={m.openIncidents.length > 0 ? 'active now' : `${m.incidents7d.length} this period`} onClick={() => onNavigate('incidents')} />
+              <IChip label={`Avg response`} value={m.avgResponseMs !== null ? `${m.avgResponseMs}ms` : '—'} color={m.avgResponseMs !== null ? responseColor(m.avgResponseMs, null) : C.muted} sub="service hours" />
+              {m.avgResolutionSec !== null && <IChip label="Avg resolution" value={formatDuration(Math.round(m.avgResolutionSec))} color="var(--tx-1)" sub="per incident" />}
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* ── Response time + Recent Activity ── */}
+      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'stretch' }}>
+        {/* Response time bars */}
+        <div style={{ flex: '2 1 300px', background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', padding: '14px 18px' }}>
+          <p style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx-1)', margin: '0 0 2px' }}>Response Times</p>
+          <p style={{ fontSize: 10, color: 'var(--tx-3)', margin: '0 0 12px' }}>Service-hours avg · 00:00–09:00 MYT excluded · threshold markers shown</p>
+          {loading
+            ? <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{Array.from({ length: 5 }, (_, i) => <div key={i} className="skeleton" style={{ height: 8 }} />)}</div>
+            : hasResponseData
+              ? <ResponseTimeBars monitors={monitors} />
+              : <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic', margin: 0 }}>No response-time data yet — check back after the first probe cycle.</p>
+          }
+        </div>
+
+        {/* Recent Activity */}
+        <div style={{ flex: '1 1 200px', background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+          <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx-1)' }}>Recent Activity</span>
+            <button onClick={() => onNavigate('incidents')} style={{ fontSize: 10, color: '#3b82f6', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>All →</button>
+          </div>
+          {loading ? (
+            <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {Array.from({ length: 5 }, (_, i) => <div key={i} className="skeleton" style={{ height: 32 }} />)}
+            </div>
+          ) : recentEvents.length === 0 ? (
+            <div style={{ padding: '18px 14px', textAlign: 'center', fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>All clear ✓</div>
+          ) : recentEvents.map((ev, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 12px', borderBottom: i < recentEvents.length - 1 ? '1px solid var(--border)' : 'none' }}>
+              <span style={{ fontSize: 11, marginTop: 1, flexShrink: 0, color: ev.color, fontWeight: 900, lineHeight: '18px' }}>{ev.icon}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ev.label}</div>
+                <div style={{ fontSize: 12, color: ev.color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ev.sub}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                  <div style={{ fontSize: 10, color: 'var(--tx-3)' }}>{new Date(ev.time).toLocaleString('en-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })} MYT</div>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 8, background: ev.resolved ? 'rgba(34,197,94,.1)' : 'rgba(239,68,68,.1)', color: ev.resolved ? '#22c55e' : '#ef4444', border: `1px solid ${ev.resolved ? 'rgba(34,197,94,.25)' : 'rgba(239,68,68,.25)'}` }}>
+                    {ev.resolved ? '✓ Resolved' : '● Open'}
+                  </span>
+                </div>
               </div>
-            ) : (
-              <MonitorStatusGrid monitors={monitors} onOpenMonitor={onOpenMonitor} />
-            )}
-          </div>
-
-          {/* Inline stat chips */}
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-            <StatChip label={`Incidents (${uptimeLabel.split(' ')[0]})`} value={String(m.incidents7d.length)} color={m.openIncidents.length > 0 ? C.danger : m.incidents7d.length > 0 ? C.warning : C.success} sub={m.openIncidents.length > 0 ? `${m.openIncidents.length} open` : m.incidents7d.length === 0 ? 'None this period' : 'All resolved'} />
-            <StatChip label="Avg response" value={m.avgResponseMs !== null ? `${m.avgResponseMs}ms` : '—'} color={m.avgResponseMs !== null ? responseColor(m.avgResponseMs, null) : C.muted} sub="healthy monitors" />
-            {m.avgResolutionSec !== null && <StatChip label="Avg resolution" value={formatDuration(Math.round(m.avgResolutionSec))} color="var(--tx-1)" sub="per incident" />}
-          </div>
-        </div>
-      </div>
-
-      {/* ── Issue mini-cards ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
-        <button
-          onClick={() => onNavigate('checks')}
-          style={CARD_BTN(failMonitorIds.length > 0 ? C.dangerBorder : 'var(--border)')}
-          onMouseEnter={e => (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-sm)'}
-          onMouseLeave={e => (e.currentTarget as HTMLElement).style.boxShadow = 'none'}
-        >
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Failed Checks</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: failMonitorIds.length > 0 ? C.danger : C.muted, lineHeight: 1.1 }}>{visibleFailCount}</div>
-          <div style={{ fontSize: 11, color: 'var(--tx-3)' }}>
-            {failMonitorIds.length > 0 ? `${failMonitorIds.length} monitor${failMonitorIds.length !== 1 ? 's' : ''} affected` : 'No failures'}
-          </div>
-          <div style={{ fontSize: 11, color: '#3b82f6', fontWeight: 600, marginTop: 4 }}>View details →</div>
-        </button>
-
-        <button
-          onClick={() => onNavigate('performance')}
-          style={CARD_BTN(slowCount > 0 ? C.warningBorder : 'var(--border)')}
-          onMouseEnter={e => (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-sm)'}
-          onMouseLeave={e => (e.currentTarget as HTMLElement).style.boxShadow = 'none'}
-        >
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Slow Monitors</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: slowCount > 0 ? C.warning : C.muted, lineHeight: 1.1 }}>{slowCount}</div>
-          <div style={{ fontSize: 11, color: 'var(--tx-3)' }}>
-            {slowCount > 0 ? 'above response threshold' : 'All within target'}
-          </div>
-          <div style={{ fontSize: 11, color: '#3b82f6', fontWeight: 600, marginTop: 4 }}>View details →</div>
-        </button>
-
-        <button
-          onClick={() => onNavigate('incidents')}
-          style={CARD_BTN(m.openIncidents.length > 0 ? C.dangerBorder : 'var(--border)')}
-          onMouseEnter={e => (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-sm)'}
-          onMouseLeave={e => (e.currentTarget as HTMLElement).style.boxShadow = 'none'}
-        >
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Open Incidents</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: m.openIncidents.length > 0 ? C.danger : C.muted, lineHeight: 1.1 }}>{m.openIncidents.length}</div>
-          <div style={{ fontSize: 11, color: 'var(--tx-3)' }}>
-            {m.openIncidents.length > 0 ? 'active right now' : `${m.incidents7d.length} in period, all resolved`}
-          </div>
-          <div style={{ fontSize: 11, color: '#3b82f6', fontWeight: 600, marginTop: 4 }}>View all →</div>
-        </button>
-      </div>
-
-      {/* ── Response time visual chart ── */}
-      {!loading && monitors.some(mon => mon.enabled && mon.avg_response_24h !== null && (mon.avg_response_24h as number) < 9500) && (
-        <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', padding: '16px 20px' }}>
-          <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', marginBottom: 2 }}>Response Times — 24h Average</p>
-          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Thresholds: API 200ms · Frontend 800ms</p>
-          <ResponseTimeBars monitors={monitors} />
-        </div>
-      )}
-
-      {/* ── Health Signals ── */}
-      <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 18px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>
-          <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--tx-1)' }}>Health Signals</span>
-          <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{bullets.length} signal{bullets.length !== 1 ? 's' : ''}</span>
-        </div>
-        <div style={{ padding: '12px 18px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {bullets.map(b => (
-            <div key={b.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 12px', background: 'var(--surface-2)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-md)' }}>
-              <span style={{ fontSize: 12, fontWeight: 800, color: b.color, flexShrink: 0, lineHeight: '18px' }}>{b.icon}</span>
-              <span style={{ fontSize: 13, color: 'var(--tx-1)', lineHeight: '18px', flex: 1 }}>{b.text}</span>
             </div>
           ))}
         </div>
       </div>
 
-      {/* ── Monitor details table ── */}
-      {(() => {
-        const TABLE_LIMIT = 8
-        const enabledMons = monitors.filter(mon => mon.enabled)
-        // Sort: down first, then degraded, then by name
-        const sorted = [...enabledMons].sort((a, b) => {
-          const rank = (m: MonitorRow) => m.status === 'down' ? 0 : m.status === 'degraded' ? 1 : 2
-          return rank(a) - rank(b) || a.name.localeCompare(b.name)
-        })
-        return (
-        <MonitorTableWidget
-          monitors={sorted}
-          loading={loading}
-          onOpenMonitor={onOpenMonitor}
-          tableLimit={TABLE_LIMIT}
-          onViewAll={() => onNavigate('monitors')}
-        />
-        )
-      })()}
+      {/* ── Health signals strip (compact, no box if empty) ── */}
+      {!loading && bullets.length > 0 && (
+        <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', alignSelf: 'center', marginRight: 4, whiteSpace: 'nowrap' }}>Signals</span>
+          {bullets.map(b => (
+            <span key={b.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '3px 10px', borderRadius: 20, background: `${b.color}10`, border: `1px solid ${b.color}30`, color: 'var(--tx-1)' }}>
+              <span style={{ color: b.color, fontWeight: 700, fontSize: 10 }}>{b.icon}</span>
+              {b.text}
+            </span>
+          ))}
+        </div>
+      )}
+      {loading && (
+        <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', padding: '10px 14px', display: 'flex', gap: 8 }}>
+          {Array.from({ length: 3 }, (_, i) => <div key={i} className="skeleton" style={{ height: 26, width: 180, borderRadius: 20 }} />)}
+        </div>
+      )}
+
+      {/* ── Monitor table ── */}
+      <MonitorTableWidget monitors={sortedMons} loading={loading} onOpenMonitor={onOpenMonitor} tableLimit={8} onViewAll={() => onNavigate('monitors')} />
     </div>
   )
 }
 
 // ─── Main Component ───────────────────────────────────────────
 
-export default function ServerHealthPage() {
+export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpdate?: (resetMs: number | null) => void } = {}) {
   const supabase = useMemo(() => createClient(), [])
   const [monitors,         setMonitors]         = useState<MonitorRow[]>([])
   const [checksByMonitor,  setChecksByMonitor]  = useState<ChecksByMonitor>({})
@@ -2133,7 +2555,7 @@ export default function ServerHealthPage() {
     if (typeof window === 'undefined') return 'overview'
     try {
       const saved = localStorage.getItem('server-health-tab') as HealthTab
-      const VALID: HealthTab[] = ['overview', 'monitors', 'checks', 'performance', 'incidents', 'anomalies']
+      const VALID: HealthTab[] = ['overview', 'monitors', 'checks', 'performance', 'lighthouse', 'incidents', 'anomalies']
       return VALID.includes(saved) ? saved : 'overview'
     } catch { return 'overview' }
   })
@@ -2147,6 +2569,8 @@ export default function ServerHealthPage() {
   const [dataLoading,      setDataLoading]      = useState(false)
   const [showDownPopover,  setShowDownPopover]  = useState(false)
   const [anomalies,        setAnomalies]        = useState<AnomalyRow[]>([])
+  const [aiProcessing,     setAiProcessing]     = useState(false)
+  const [aiRateLimitReset, setAiRateLimitReset] = useState<number | null>(null)
   const [expandedAnomalyId, setExpandedAnomalyId] = useState<string | null>(null)
   const [anomalyLogs, setAnomalyLogs] = useState<Record<string, {
     events: { timestamp: number | null; message: string }[]
@@ -2158,7 +2582,10 @@ export default function ServerHealthPage() {
   const fetchedAnomalyIds  = useRef<Set<string>>(new Set())
   const INC_PAGE_SIZE = 8
 
+
   const isMaintenance = isMYTMaintenanceNow()
+
+  useEffect(() => { onRateLimitUpdate?.(aiRateLimitReset) }, [aiRateLimitReset, onRateLimitUpdate])
 
   const toggleIncident = useCallback((id: string) => {
     setExpandedIncIds(prev => {
@@ -2201,6 +2628,30 @@ export default function ServerHealthPage() {
     }
   }, [])
 
+  // Non-blocking AI processing — runs in parallel with fetchAll, updates anomaly rows in-place
+  const runAiProcessing = useCallback(async (newAnomalies: unknown[]) => {
+    setAiProcessing(true)
+    try {
+      const res = await fetch('/api/anomalies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAnomalies),
+      })
+      if (!res.ok) return
+      const data: { upserted: number; analyzed: number; tokensUsed?: number; rateLimitResetMs?: number } = await res.json()
+      if (data.rateLimitResetMs) setAiRateLimitReset(data.rateLimitResetMs)
+      if (data.analyzed > 0) {
+        // Refresh anomalies from DB so newly-analyzed rows show their diagnosis
+        const freshRes = await fetch('/api/anomalies?days=30')
+        if (freshRes.ok) {
+          const freshData = await freshRes.json()
+          setAnomalies(freshData as AnomalyRow[])
+        }
+      }
+    } catch { /* best-effort */ }
+    finally { setAiProcessing(false) }
+  }, [])
+
   const fetchAll = useCallback(async (background = false) => {
     if (background) setRefreshing(true)
     setError(null)
@@ -2212,7 +2663,6 @@ export default function ServerHealthPage() {
       if (mErr) throw mErr
 
       const monList: MonitorRow[] = monData ?? []
-      setMonitors(monList)
 
       const checksMap: ChecksByMonitor = {}
       if (monList.length > 0) {
@@ -2239,6 +2689,18 @@ export default function ServerHealthPage() {
       }
       setChecksByMonitor(checksMap)
 
+      // Override avg_response_24h with maintenance-excluded avg from the sparkline checks
+      // (checks already have isMaintenancePeriod filtered out, so this reflects active service hours only)
+      const adjustedMonitors = monList.map(mon => {
+        const checks = checksMap[mon.id] ?? []
+        const validMs = checks
+          .filter(c => c.status === 'up' && c.response_time_ms !== null && c.response_time_ms > 0 && c.response_time_ms < 9_500)
+          .map(c => c.response_time_ms!)
+        if (validMs.length === 0) return mon
+        return { ...mon, avg_response_24h: Math.round(validMs.reduce((a, b) => a + b, 0) / validMs.length) }
+      })
+      setMonitors(adjustedMonitors)
+
       // ── Anomaly detection ─────────────────────────────────────
       const newAnomalies: {
         monitor_id: string; monitor_name: string; monitor_target: string
@@ -2254,10 +2716,10 @@ export default function ServerHealthPage() {
         for (const row of rows) {
           const key = `${mon.id}:${row.checked_at}`
           if (postedAnomalyKeys.current.has(key)) continue
-          const isSpike = avgMs > 0 && (row.response_time_ms ?? 0) >= avgMs * 2
+          const isSpike = avgMs > 0 && (row.response_time_ms ?? 0) >= avgMs * 5  // 5× baseline — only real spikes
           const isDown  = row.status === 'down'
-          const isDeg   = row.status === 'degraded'
-          if (!isSpike && !isDown && !isDeg) continue
+          // ponytail: degraded excluded — too noisy; re-add if specific monitors warrant it
+          if (!isSpike && !isDown) continue
           postedAnomalyKeys.current.add(key)
           const ratio = avgMs > 0 && row.response_time_ms ? row.response_time_ms / avgMs : null
           newAnomalies.push({
@@ -2265,7 +2727,7 @@ export default function ServerHealthPage() {
             monitor_name:    mon.name,
             monitor_target:  mon.target,
             checked_at:      row.checked_at,
-            anomaly_type:    isDown ? 'down' : isDeg ? 'degraded' : 'spike',
+            anomaly_type:    isDown ? 'down' : 'spike',
             response_time_ms: row.response_time_ms,
             avg_ms:          avgMs > 0 ? Math.round(avgMs) : null,
             spike_ratio:     ratio ? parseFloat(ratio.toFixed(2)) : null,
@@ -2276,17 +2738,18 @@ export default function ServerHealthPage() {
           })
         }
       }
-      if (newAnomalies.length) {
-        fetch('/api/anomalies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newAnomalies) })
-          .catch(() => {/* silent — anomaly storage is best-effort */})
-      }
-      // Fetch stored anomalies for Anomalies tab (last 30 days)
-      const { data: aData } = await supabase
+      // Non-blocking — drains backlog on every cycle, shows progress in UI
+      runAiProcessing(newAnomalies)
+      // Fetch stored anomalies for Anomalies tab — window matches the selected time range
+      const anomalyWin = getTimeWindow(timeRange, customFrom, customTo)
+      let anomalyQ = supabase
         .from('monitor_anomalies')
         .select('*')
-        .gte('created_at', new Date(Date.now() - 30 * 86_400_000).toISOString())
         .order('checked_at', { ascending: false })
-        .limit(500)
+        .limit(2000)
+      if (anomalyWin.since) anomalyQ = anomalyQ.gte('checked_at', anomalyWin.since)
+      if (anomalyWin.until) anomalyQ = anomalyQ.lte('checked_at', anomalyWin.until)
+      const { data: aData } = await anomalyQ
       setAnomalies((aData ?? []) as AnomalyRow[])
       // ─────────────────────────────────────────────────────────
 
@@ -2334,12 +2797,15 @@ export default function ServerHealthPage() {
       setRefreshing(false)
       setDataLoading(false)
     }
-  }, [supabase, timeRange, customFrom, customTo, sparklineRange])
+  }, [supabase, timeRange, customFrom, customTo, sparklineRange, runAiProcessing])
 
   useEffect(() => {
     const t = setTimeout(() => fetchAll(false), 0)
     const interval = setInterval(() => fetchAll(true), 30_000)
-    return () => { clearTimeout(t); clearInterval(interval) }
+    // Resume immediately when user returns to this tab/page
+    const onVisible = () => { if (document.visibilityState === 'visible') fetchAll(true) }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { clearTimeout(t); clearInterval(interval); document.removeEventListener('visibilitychange', onVisible) }
   }, [fetchAll])
 
   useEffect(() => {
@@ -2355,22 +2821,28 @@ export default function ServerHealthPage() {
     return map
   }, [monitors])
 
+  // DB query now filters by time range — anomalies state already contains only matching rows
+  const filteredAnomalies = anomalies
+
   // Tab badge counts
   const tabBadges = useMemo((): Partial<Record<HealthTab, number>> => {
     const enabled = monitors.filter(m => m.enabled)
     const down    = enabled.filter(m => m.status === 'down' || m.status === 'degraded').length
     const failGroups = new Set(failedChecks.map(fc => fc.monitor_id)).size
-    const slow = monitors.filter(m => m.avg_response_24h && m.enabled && m.avg_response_24h >= (isWebEndpoint(m.name) ? 800 : 200)).length
+    const slow = monitors.filter(m => {
+      if (!m.avg_response_24h || !m.enabled) return false
+      const threshold = m.degraded_threshold_ms ?? (isWebEndpoint(m.name) ? 800 : 200)
+      return m.avg_response_24h >= threshold
+    }).length
     const openInc = incidents.filter(i => i.is_open).length
-    const recentAnomalies = anomalies.filter(a => Date.now() - new Date(a.checked_at).getTime() < 24 * 3_600_000).length
     return {
       monitors:    down > 0 ? down : undefined,
       checks:      failGroups > 0 ? failGroups : undefined,
       performance: slow > 0 ? slow : undefined,
       incidents:   openInc > 0 ? openInc : undefined,
-      anomalies:   recentAnomalies > 0 ? recentAnomalies : undefined,
+      anomalies:   filteredAnomalies.length > 0 ? filteredAnomalies.length : undefined,
     }
-  }, [monitors, failedChecks, incidents, anomalies])
+  }, [monitors, failedChecks, incidents, filteredAnomalies])
 
   return (
     <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -2397,31 +2869,50 @@ export default function ServerHealthPage() {
                 </span>
               )}
             </div>
-            <p style={{ fontSize: 13, color: 'var(--tx-3)', margin: 0 }}>
-              Live infrastructure monitoring · updates every 30 s
-              {!loading && <> · Last updated {secondsAgo === 0 ? 'just now' : `${secondsAgo}s ago`}</>}
-            </p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
+              <p style={{ fontSize: 13, color: 'var(--tx-3)', margin: 0 }}>
+                Live infrastructure monitoring · updates every 30 s
+                {!loading && <> · Last updated {secondsAgo === 0 ? 'just now' : `${secondsAgo}s ago`}</>}
+              </p>
+              {/* AI status chip */}
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                fontSize: 10,
+                color: aiRateLimitReset ? C.warning : aiProcessing ? '#60a5fa' : 'var(--tx-3)',
+                padding: '3px 10px', borderRadius: 10,
+                background: aiRateLimitReset ? 'rgba(245,158,11,.1)' : aiProcessing ? 'rgba(59,130,246,.12)' : 'var(--surface-2)',
+                border: `1px solid ${aiRateLimitReset ? 'rgba(245,158,11,.3)' : aiProcessing ? 'rgba(59,130,246,.3)' : 'var(--border)'}`,
+                transition: 'all .3s',
+              }}>
+                {aiRateLimitReset
+                  ? <>⚠ AI limit reached · resets {new Date(aiRateLimitReset).toLocaleString('en-AU', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })} MYT</>
+                  : aiProcessing
+                    ? <><span className="anim-spin" style={{ display: 'inline-block', fontSize: 10 }}>⟳</span> AI analyzing…</>
+                    : <><span style={{ fontSize: 9, opacity: 0.7 }}>✦</span> AI ready</>
+                }
+              </span>
+            </div>
           </div>
           {!loading && monitors.length > 0 && (() => {
-            const downMonitors = monitors.filter(m => m.enabled && m.status === 'down')
+            const affectedMonitors = monitors.filter(m => m.enabled && (m.status === 'down' || m.status === 'degraded'))
             return (
               <div style={{ position: 'relative', alignSelf: 'flex-start' }}>
                 <button
-                  onClick={() => downMonitors.length > 0 && setShowDownPopover(s => !s)}
+                  onClick={() => affectedMonitors.length > 0 && setShowDownPopover(s => !s)}
                   style={{
                     fontSize: 13, fontWeight: 700, padding: '6px 16px', borderRadius: 20,
                     background: overallStatus.bg, color: overallStatus.color,
                     borderWidth: 1, borderStyle: 'solid', borderColor: overallStatus.border,
                     whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6,
-                    cursor: downMonitors.length > 0 ? 'pointer' : 'default',
+                    cursor: affectedMonitors.length > 0 ? 'pointer' : 'default',
                   }}
                 >
                   {overallStatus.label}
-                  {downMonitors.length > 0 && <span style={{ fontSize: 11, opacity: 0.7 }}>▾</span>}
+                  {affectedMonitors.length > 0 && <span style={{ fontSize: 11, opacity: 0.7 }}>▾</span>}
                 </button>
-                {showDownPopover && downMonitors.length > 0 && (
+                {showDownPopover && affectedMonitors.length > 0 && (
                   <DownServicesPopover
-                    monitors={downMonitors}
+                    monitors={affectedMonitors}
                     onSelect={m => { setExpandedMonitor(m); setShowDownPopover(false) }}
                     onClose={() => setShowDownPopover(false)}
                   />
@@ -2565,6 +3056,17 @@ export default function ServerHealthPage() {
             </div>
           ) : (
             <PerformanceInsightsSection monitors={monitors} />
+          )
+        )}
+
+        {/* ── Lighthouse Tab ── */}
+        {activeTab === 'lighthouse' && (
+          loading ? (
+            <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {Array.from({ length: 3 }, (_, i) => <div key={i} className="skeleton" style={{ height: 80 }} />)}
+            </div>
+          ) : (
+            <LighthouseAuditSection monitors={monitors} />
           )
         )}
 
@@ -2712,17 +3214,32 @@ export default function ServerHealthPage() {
           <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
             <div style={{ padding: '14px 20px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
               <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--tx-1)', margin: 0 }}>Detected Anomalies</h2>
-              {!loading && anomalies.length > 0 && (
-                <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 10, background: 'var(--surface-2)', color: 'var(--tx-3)' }}>{anomalies.length}</span>
+              {!loading && filteredAnomalies.length > 0 && (
+                <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 10, background: 'var(--surface-2)', color: 'var(--tx-3)' }}>{filteredAnomalies.length}</span>
               )}
-              <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>Last 30 days · click View Logs to fetch CloudWatch + AI diagnosis</span>
+              {aiRateLimitReset ? (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#f59e0b', padding: '2px 8px', borderRadius: 10, background: 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.3)' }}>
+                  ⚠ OpenRouter free tier exhausted — resets {new Date(aiRateLimitReset).toLocaleString('en-AU', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })} MYT
+                </span>
+              ) : aiProcessing && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#60a5fa', padding: '2px 8px', borderRadius: 10, background: 'rgba(59,130,246,.1)', border: '1px solid rgba(59,130,246,.25)' }}>
+                  <span className="anim-spin" style={{ display: 'inline-block' }}>⟳</span>
+                  AI processing backlog…
+                </span>
+              )}
+              <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>
+                {getWindowLabel(timeRange, customFrom, customTo)} · hover ratio for details · click View Logs for CloudWatch
+              </span>
             </div>
             {loading ? (
               <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {Array.from({ length: 5 }, (_, i) => <div key={i} className="skeleton" style={{ height: 12 }} />)}
               </div>
-            ) : anomalies.length === 0 ? (
-              <div style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 13 }}>No anomalies detected in the last 30 days.</div>
+            ) : filteredAnomalies.length === 0 ? (
+              <div style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 13 }}>
+                No anomalies detected in {getWindowLabel(timeRange, customFrom, customTo).toLowerCase()}.
+                {anomalies.length > 0 && timeRange !== '30d' && <span> Try <button onClick={() => setTimeRange('30d')} style={{ color: '#60a5fa', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: 13 }}>last 30 days</button> to see all.</span>}
+              </div>
             ) : (
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -2734,8 +3251,8 @@ export default function ServerHealthPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {anomalies.map((a, i) => {
-                      const isLast = i === anomalies.length - 1
+                    {filteredAnomalies.map((a, i) => {
+                      const isLast = i === filteredAnomalies.length - 1
                       const isExpanded = expandedAnomalyId === a.id
                       const logData = anomalyLogs[a.id]
                       const typeColor = a.anomaly_type === 'spike'
@@ -2764,7 +3281,12 @@ export default function ServerHealthPage() {
                               {a.response_time_ms != null ? `${a.response_time_ms}ms` : '—'}
                               {a.avg_ms != null && <span style={{ color: 'var(--tx-3)', fontWeight: 400, marginLeft: 4 }}>/ {a.avg_ms}ms avg</span>}
                             </td>
-                            <td style={{ padding: '10px 14px', color: a.spike_ratio != null ? typeColor : 'var(--tx-3)', fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap' }}>
+                            <td
+                              title={a.spike_ratio != null
+                                ? `${a.spike_ratio.toFixed(2)}× slower than baseline — this check took ${a.response_time_ms}ms vs the ${a.avg_ms}ms normal average`
+                                : undefined}
+                              style={{ padding: '10px 14px', color: a.spike_ratio != null ? typeColor : 'var(--tx-3)', fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap', cursor: a.spike_ratio != null ? 'help' : undefined }}
+                            >
                               {a.spike_ratio != null ? `${a.spike_ratio.toFixed(1)}×` : '—'}
                             </td>
                             <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontSize: 12, color: a.status_code && a.status_code >= 500 ? C.danger : a.status_code && a.status_code >= 400 ? C.warning : 'var(--tx-2)' }}>
@@ -2778,7 +3300,14 @@ export default function ServerHealthPage() {
                             <td style={{ padding: '10px 14px', maxWidth: 240, minWidth: 160 }}>
                               {a.ai_analysis
                                 ? <span style={{ fontSize: 12, color: 'var(--tx-2)', lineHeight: 1.45 }}>{a.ai_analysis}</span>
-                                : <span style={{ fontSize: 11, color: 'var(--tx-3)', fontStyle: 'italic' }}>Pending…</span>}
+                                : aiRateLimitReset
+                                  ? <span style={{ fontSize: 11, color: '#f59e0b', fontStyle: 'italic' }}>Rate limited</span>
+                                  : aiProcessing
+                                    ? <span style={{ fontSize: 11, color: '#60a5fa', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                                        <span className="anim-spin" style={{ display: 'inline-block', fontSize: 11 }}>⟳</span>
+                                        Analyzing…
+                                      </span>
+                                    : <span style={{ fontSize: 11, color: 'var(--tx-3)', fontStyle: 'italic' }}>Queued</span>}
                             </td>
                             <td style={{ padding: '10px 14px' }}>
                               {hasLogs ? (
@@ -2883,6 +3412,12 @@ export default function ServerHealthPage() {
           monitorNames={monitorNames}
           onClose={() => setExpandedMonitor(null)}
           initialChecks={checksByMonitor[expandedMonitor.id] ?? []}
+          anomalies={anomalies}
+          onNavigateToIncident={(id) => {
+            setExpandedMonitor(null)
+            setActiveTab('incidents')
+            setExpandedIncIds(new Set([id]))
+          }}
         />
       )}
     </div>

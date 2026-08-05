@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
             'X-Title': 'Yuzee Bug Monitor',
           },
           body: JSON.stringify({
-            model: 'meta-llama/llama-3.2-3b-instruct:free',
+            model: 'google/gemma-4-26b-a4b-it:free',
             messages: [{
               role: 'user',
               content: [

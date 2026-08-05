@@ -12,7 +12,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts'
 
-interface Props { bugs: ParsedBug[]; stats: DashboardStats; onNavigateToBugs?: (f: Record<string, string | string[]>) => void }
+interface Props { bugs: ParsedBug[]; stats: DashboardStats }
 type TimeRange = 'today' | '7d' | '30d'
 
 const P_COLORS: Record<string, string> = { P1: '#ef4444', P2: '#f59e0b', P3: '#3b82f6', P4: '#6b7280' }

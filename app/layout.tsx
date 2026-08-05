@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 import ToastContainer from '@/components/ui/ToastContainer'
 import { ThemeProvider } from '@/components/ThemeProvider'
+import SwRegistrar from '@/components/SwRegistrar'
 
 export const metadata: Metadata = {
   title: 'Yuzee Bug Dashboard',
@@ -23,6 +24,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ThemeProvider>
           {children}
           <ToastContainer />
+          <SwRegistrar />
         </ThemeProvider>
       </body>
     </html>

@@ -7,7 +7,7 @@ interface AnomalyPayload {
   monitor_name: string
   monitor_target: string
   checked_at: string
-  anomaly_type: 'spike' | 'down' | 'degraded'
+  anomaly_type: 'spike' | 'down'
   response_time_ms: number | null
   avg_ms: number | null
   spike_ratio: number | null
@@ -27,6 +27,7 @@ function makeSupabase(cookieStore: Awaited<ReturnType<typeof cookies>>) {
 
 export async function POST(req: NextRequest) {
   const anomalies: AnomalyPayload[] = await req.json()
+  console.log('[anomaly-api] POST called, incoming anomalies:', anomalies?.length ?? 0)
   const cookieStore = await cookies()
   const supabase = makeSupabase(cookieStore)
 
@@ -37,31 +38,45 @@ export async function POST(req: NextRequest) {
     .then(() => {})
 
   if (anomalies?.length) {
-    // Upsert new detections — skip duplicates (same monitor + checked_at)
-    await supabase
+    // 30-min cooldown per monitor — don't flood DB with repeated anomalies for ongoing incidents
+    const thirtyMinAgo = new Date(Date.now() - 30 * 60_000).toISOString()
+    const { data: recentRows } = await supabase
       .from('monitor_anomalies')
-      .upsert(anomalies, { onConflict: 'monitor_id,checked_at', ignoreDuplicates: true })
+      .select('monitor_id')
+      .gte('checked_at', thirtyMinAgo)
+    const coolingDown = new Set((recentRows ?? []).map((r: { monitor_id: string }) => r.monitor_id))
+    const toInsert = anomalies.filter(a => !coolingDown.has(a.monitor_id))
+
+    if (toInsert.length) {
+      await supabase
+        .from('monitor_anomalies')
+        .upsert(toInsert, { onConflict: 'monitor_id,checked_at', ignoreDuplicates: true })
+    }
   }
 
-  // Analyze ALL pending rows (null ai_analysis, last 30 days) — drains backlog too
+  // Drain the pending backlog — table is already curated (5× threshold, 30-min cooldown), analyze all
   const { data: pending } = await supabase
     .from('monitor_anomalies')
     .select('id, monitor_name, monitor_target, anomaly_type, response_time_ms, avg_ms, spike_ratio, error_class, error_message, status_code')
     .is('ai_analysis', null)
     .gte('created_at', new Date(Date.now() - 30 * 86_400_000).toISOString())
     .order('created_at', { ascending: false })
-    .limit(5)
+    .limit(15)
 
   let analyzed = 0
+  let tokensUsed = 0
+  let rateLimitResetMs: number | null = null
   for (const row of (pending ?? [])) {
-    const analysis = await analyzeAnomaly(row)
-    if (analysis) {
-      await supabase.from('monitor_anomalies').update({ ai_analysis: analysis }).eq('id', row.id)
+    const result = await analyzeAnomaly(row)
+    if (result && 'rateLimited' in result) { rateLimitResetMs = result.resetMs; break }  // stop immediately
+    if (result && 'text' in result) {
+      await supabase.from('monitor_anomalies').update({ ai_analysis: result.text }).eq('id', row.id)
       analyzed++
+      tokensUsed += result.tokens
     }
   }
 
-  return NextResponse.json({ upserted: anomalies?.length ?? 0, analyzed })
+  return NextResponse.json({ upserted: anomalies?.length ?? 0, analyzed, tokensUsed, rateLimitResetMs })
 }
 
 // GET /api/anomalies?days=30 — read stored anomalies for the Anomalies tab
@@ -87,7 +102,7 @@ async function analyzeAnomaly(anomaly: {
   monitor_name: string; monitor_target: string; anomaly_type: string
   response_time_ms: number | null; avg_ms: number | null; spike_ratio: number | null
   error_class: string | null; error_message: string | null; status_code: number | null
-}): Promise<string | null> {
+}): Promise<{ text: string; tokens: number } | { rateLimited: true; resetMs: number } | null> {
   const apiKey = process.env.OPENROUTER_API_KEY
   if (!apiKey) return null
 
@@ -116,15 +131,29 @@ async function analyzeAnomaly(anomaly: {
         'X-Title': 'Yuzee Bug Monitor',
       },
       body: JSON.stringify({
-        model: 'meta-llama/llama-3.2-3b-instruct:free',
+        model: 'google/gemma-4-26b-a4b-it:free',
         messages: [{ role: 'user', content: lines.join('\n') }],
         max_tokens: 120,
         temperature: 0.3,
       }),
     })
-    if (!res.ok) return null
+    if (res.status === 429) {
+      const resetMs = parseInt(res.headers.get('X-RateLimit-Reset') ?? '0', 10) || null
+      console.warn('[anomaly-ai] Rate limited — resets at', resetMs ? new Date(resetMs).toISOString() : 'unknown')
+      return { rateLimited: true, resetMs: resetMs ?? 0 }
+    }
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '(unreadable)')
+      console.error(`[anomaly-ai] OpenRouter ${res.status}:`, errText)
+      return null
+    }
     const data = await res.json()
-    return data.choices?.[0]?.message?.content?.trim() ?? null
+    const text = data.choices?.[0]?.message?.content?.trim() ?? null
+    if (!text) return null
+    // Free models often return usage: 0 — estimate from character counts (÷4 ≈ tokens)
+    const prompt = lines.join('\n')
+    const estimated = Math.ceil(prompt.length / 4) + Math.ceil(text.length / 4)
+    return { text, tokens: data.usage?.total_tokens || estimated }
   } catch {
     return null
   }

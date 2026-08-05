@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
+import { useState, useMemo, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { logoutAction } from '@/app/actions/auth'
 import { parseBug, computeStats } from '@/lib/bugUtils'
@@ -331,7 +331,7 @@ export const BLANK_FILTERS: Filters = {
 }
 
 interface AdminUser { email: string }
-interface Props { user: AdminUser; initialBugs: BugReport[] }
+interface Props { user: AdminUser; initialBugs: BugReport[]; initialTab?: Tab }
 
 function LegacyEmptyState({ onEnable }: { onEnable: () => void }) {
   return (
@@ -389,7 +389,7 @@ const S = {
   body: { display:'flex', flex:1, overflow:'hidden' } as const,
 }
 
-export default function DashboardClient({ user, initialBugs }: Props) {
+export default function DashboardClient({ user, initialBugs, initialTab }: Props) {
   const supabase = useMemo(() => createClient(), [])
   const { theme, toggleTheme } = useTheme()
   const { online } = useNetworkStatus()
@@ -398,10 +398,11 @@ export default function DashboardClient({ user, initialBugs }: Props) {
   const { tickets: fetchedTickets, loading: ticketsLoading, error: ticketsError, refresh: refreshTickets } = useInternalTickets()
 
   const [bugs, setBugs] = useState<BugReport[]>(initialBugs)
-  const [activeTab, _setActiveTab] = useState<Tab>('overview')
+  const [activeTab, _setActiveTab] = useState<Tab>(initialTab ?? 'overview')
   const setActiveTab = useCallback((tab: Tab) => {
     _setActiveTab(tab)
     history.replaceState(null, '', tab === 'overview' ? window.location.pathname + window.location.search : `#${tab}`)
+    try { document.cookie = `yuzee_active_tab=${tab};path=/;max-age=86400;SameSite=Lax` } catch {}
   }, [])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [filters, setFilters] = useState<Filters>(BLANK_FILTERS)
@@ -425,12 +426,14 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     return () => clearTimeout(id)
   }, [])
 
-  // Restore active tab from URL hash on mount (survives refresh)
-  useEffect(() => {
+  // Hash-based tab restore — only when no cookie was provided by the server.
+  // Cookie takes priority (no flash on refresh). Hash still works for shared links.
+  useLayoutEffect(() => {
+    if (initialTab) return
     const VALID_TABS: Tab[] = ['overview','bugs','clusters','pipeline','triage','feedback','developer','reports','daily','tickets','posthog','server-health','guide']
     const hash = window.location.hash.slice(1) as Tab
     if (VALID_TABS.includes(hash)) _setActiveTab(hash)
-  }, [])
+  }, [initialTab])
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed(prev => {
       const next = !prev
@@ -460,7 +463,10 @@ export default function DashboardClient({ user, initialBugs }: Props) {
     setActiveTab('tickets')
   }, [])
 
+
   // Legacy toggle: default ON only when there's no live (post-cutoff) data yet,
+  const [aiRateLimitReset, setAiRateLimitReset] = useState<number | null>(null)
+
   // so the dashboard isn't empty on first load before real live data exists.
   const [includeLegacy, setIncludeLegacy] = useState<boolean>(() => {
     const hasNonLegacy = initialBugs.some(b => new Date(b.created_at).getTime() >= new Date(LEGACY_CUTOFF_ISO).getTime())
@@ -856,6 +862,12 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                 </button>
               )}
 
+              {aiRateLimitReset && (
+                <span style={{ display:'flex', alignItems:'center', gap:5, fontSize:11, color:'#f59e0b', padding:'3px 10px', borderRadius:10, background:'rgba(245,158,11,.1)', border:'1px solid rgba(245,158,11,.3)', flexShrink:0, whiteSpace:'nowrap' }}>
+                  ⚠ AI limit resets {new Date(aiRateLimitReset).toLocaleString('en-AU', { timeZone:'Asia/Kuala_Lumpur', hour:'2-digit', minute:'2-digit', day:'2-digit', month:'short' })} MYT
+                </span>
+              )}
+
               <button
                 onClick={() => setIncludeLegacy(v => !v)}
                 aria-pressed={includeLegacy}
@@ -874,6 +886,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                 <History size={13} aria-hidden />
                 Legacy {includeLegacy ? 'on' : 'off'}
               </button>
+
 
               <button
                 onClick={toggleTheme}
@@ -1095,12 +1108,11 @@ export default function DashboardClient({ user, initialBugs }: Props) {
                 bugs={parsedBugs}
                 stats={stats}
                 onViewBugs={(routing) => navigateToBugs({ platform: [routing] })}
-                onViewTickets={() => setActiveTab('tickets')}
               />
             )}
 
             {activeTab === 'reports' && (
-              <Reports bugs={parsedBugs} stats={stats} onNavigateToBugs={navigateToBugs} />
+              <Reports bugs={parsedBugs} stats={stats} />
             )}
 
             {activeTab === 'posthog' && (
@@ -1108,7 +1120,7 @@ export default function DashboardClient({ user, initialBugs }: Props) {
             )}
 
             {activeTab === 'server-health' && (
-              <ServerHealthPage />
+              <ServerHealthPage onRateLimitUpdate={setAiRateLimitReset} />
             )}
 
             {activeTab === 'guide' && (

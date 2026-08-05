@@ -4,7 +4,7 @@ import type { ParsedBug, DashboardStats } from '@/lib/bugUtils'
 import { ROUTING_COLORS } from '@/lib/utils'
 import { ExternalLink, AlertTriangle, User } from 'lucide-react'
 
-interface Props { bugs: ParsedBug[]; stats: DashboardStats; onViewBugs?: (routing: string) => void; onViewTickets?: () => void }
+interface Props { bugs: ParsedBug[]; stats: DashboardStats; onViewBugs?: (routing: string) => void }
 
 const SEV: Record<string, string> = { P1: 'var(--p1)', P2: 'var(--p2)', P3: 'var(--p3)', P4: 'var(--p4)' }
 

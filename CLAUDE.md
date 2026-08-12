@@ -819,3 +819,43 @@ Tab badges are red/amber for actionable counts (down monitors, open incidents, f
 - Performance thresholds: web endpoints (`name.includes('frontend')`) → 800ms; all others → 200ms.
 - `PerformanceInsightsSection` and `FailedChecksSection` both accept `suppressedIds: Set<string>` + `onSuppress: (id) => void` — pass from `ServerHealthPage` state.
 - `buildBullets()` now returns `BulletPoint[]` with `key` field — do not add bullets without a stable, unique key or suppression will misfire.
+
+---
+
+## Implementation State (as of 2026-08-07)
+
+### Lighthouse audit history + hydration fix
+
+#### Hydration fix
+
+`activeTab` was initialised with a lazy `useState` callback that read `localStorage` — this produced a different value on the server (`'overview'`) vs the client (e.g. `'lighthouse'`), causing the React hydration mismatch error in the tab bar and loading skeletons.
+
+Fix: always initialise `activeTab` to `'overview'`, then restore the saved value from localStorage in a `useEffect` that runs only on the client after hydration.
+
+#### Lighthouse audit history
+
+Supabase table **`lighthouse_audits`** added (migration `create_lighthouse_audits`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` | PK, `gen_random_uuid()` |
+| `url` | `text` | Audited URL |
+| `strategy` | `text` | `'desktop'` or `'mobile'` |
+| `scores` | `jsonb` | `{ performance, accessibility, bestPractices, seo }` |
+| `metrics` | `jsonb` | `{ fcp, lcp, tbt, cls, tti, speedIndex, ttfb }` |
+| `opportunities` | `jsonb` | Array of `{ id, title, savingsMs }` |
+| `diagnostics` | `jsonb` | Array of `{ id, title, description }` |
+| `fetched_at` | `timestamptz` | Timestamp from the PSI API response |
+| `created_at` | `timestamptz` | Row insert time, default `now()` |
+
+RLS: SELECT/INSERT/DELETE open to public (dashboard anon key), same pattern as other tables.
+
+**Retention:** 30 days. Records older than 30 days are pruned client-side in `saveAudit()` after each successful audit (best-effort `DELETE WHERE created_at < now() - 30d`).
+
+**`LighthouseAuditSection` changes:**
+- Auto-saves each successful audit result to `lighthouse_audits` via Supabase insert.
+- Loads history on mount (`gte created_at thirtyDaysAgo`, limit 300, ordered by `fetched_at desc`).
+- Collapsible **Audit History** panel at the bottom of the section shows all saved audits in a compact table: When (MYT) · URL · Strategy · Perf / A11y / BP / SEO scores (colour-coded) · LCP · TBT.
+- Pruning and history refresh happen together after each save.
+
+**New type:** `LighthouseAuditRow` — the database row shape (snake_case `fetched_at`/`created_at`), distinct from `LighthouseResult` (camelCase `fetchedAt`). Do not conflate them.

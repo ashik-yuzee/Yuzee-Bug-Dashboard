@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useEffect } from 'react'
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts'
 import type { DashboardStats, ParsedBug } from '@/lib/bugUtils'
 import { computeStats } from '@/lib/bugUtils'
@@ -15,7 +15,7 @@ import {
   AlertTriangle, TrendingUp, Zap, Info, RefreshCw,
   ArrowUpRight, ArrowDownRight, Minus, CheckCircle2,
   Radio, Cpu, Activity, Cloud, Globe, Server, Smartphone,
-  Database, Package, BarChart2,
+  Database, Package, BarChart2, Sparkles,
   Link, XCircle, Ticket as TicketIcon,
 } from 'lucide-react'
 import { ROUTING_COLORS, jiraUrl } from '@/lib/utils'
@@ -476,6 +476,143 @@ function PostHogOverviewWidget({ onNavigate }: { onNavigate?: () => void }) {
   )
 }
 
+/* ─── window width hook ──────────────────────────────────────────── */
+function useWindowWidth(): number {
+  const [width, setWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 1280)
+  useEffect(() => {
+    const handler = () => setWidth(window.innerWidth)
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
+  return width
+}
+
+/* ─── insight styles (module-level, not inside render) ───────────── */
+const ISTYLE: Record<string, { border: string; bg: string; col: string }> = {
+  critical: { border: 'rgba(255,123,114,.22)', bg: 'rgba(255,123,114,.06)', col: 'var(--danger)'  },
+  warning:  { border: 'rgba(227,179,65,.22)',  bg: 'rgba(227,179,65,.06)',  col: 'var(--warning)' },
+  action:   { border: 'rgba(163,113,247,.22)', bg: 'rgba(163,113,247,.06)', col: 'var(--purple)'  },
+  info:     { border: 'rgba(88,166,255,.18)',  bg: 'rgba(88,166,255,.06)',  col: 'var(--info)'    },
+}
+
+/* ─── animated KPI tile ─────────────────────────────────────────── */
+function KpiTile({ label, value, valueSuffix, sub, color, icon, onClick, delta, trendGood, animDelay = 0 }: {
+  label: string; value: number; valueSuffix?: string; sub?: string; color: string
+  icon?: React.ReactNode; onClick?: () => void
+  delta?: { n: number; label: string }; trendGood?: boolean; animDelay?: number
+}) {
+  const [displayed, setDisplayed] = useState(0)
+  useEffect(() => {
+    if (value === 0) { setDisplayed(0); return }
+    const start = Date.now()
+    const duration = 700
+    const tick = () => {
+      const p = Math.min((Date.now() - start) / duration, 1)
+      const eased = 1 - Math.pow(1 - p, 3)
+      setDisplayed(Math.round(eased * value))
+      if (p < 1) requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  }, [value])
+  return (
+    <div
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      style={{
+        background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 14,
+        padding: '18px 20px', cursor: onClick ? 'pointer' : 'default',
+        transition: 'border-color .18s, box-shadow .18s, transform .18s',
+        animationDelay: `${animDelay}ms`,
+        position: 'relative', overflow: 'hidden',
+      }}
+      onMouseEnter={onClick ? e => {
+        const el = e.currentTarget as HTMLElement
+        el.style.borderColor = color + '60'
+        el.style.boxShadow = `0 0 0 1px ${color}25, 0 8px 24px rgba(0,0,0,.4)`
+        el.style.transform = 'translateY(-2px)'
+      } : undefined}
+      onMouseLeave={onClick ? e => {
+        const el = e.currentTarget as HTMLElement
+        el.style.borderColor = 'var(--border)'
+        el.style.boxShadow = 'none'
+        el.style.transform = 'none'
+      } : undefined}
+    >
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: color, borderRadius: '14px 14px 0 0' }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.09em' }}>{label}</span>
+        {icon && <span style={{ color: color + 'aa', opacity: .8 }}>{icon}</span>}
+      </div>
+      <div className="font-brand" style={{ fontSize: 38, fontWeight: 800, color: value === 0 ? 'var(--tx-3)' : color, lineHeight: 1, fontVariantNumeric: 'tabular-nums', marginBottom: 4 }}>
+        {displayed.toLocaleString()}{valueSuffix ?? ''}
+      </div>
+      {sub && <div style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 2, lineHeight: 1.4 }}>{sub}</div>}
+      {delta && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+          {delta.n > 0
+            ? <ArrowUpRight size={10} color={trendGood ? '#3fb950' : '#ef4444'} />
+            : delta.n < 0
+            ? <ArrowDownRight size={10} color={trendGood ? '#ef4444' : '#3fb950'} />
+            : <Minus size={10} color="var(--tx-3)" />}
+          <span style={{ fontSize: 10, fontWeight: 700, color: delta.n === 0 ? 'var(--tx-3)' : delta.n > 0 ? (trendGood ? '#3fb950' : '#ef4444') : (trendGood ? '#ef4444' : '#3fb950') }}>
+            {delta.n > 0 ? '+' : ''}{delta.n}
+          </span>
+          <span style={{ fontSize: 10, color: 'var(--tx-3)' }}>{delta.label}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ─── staggered animated progress bar ───────────────────────────── */
+function AnimBar({ label, value, max, color, onClick, delay = 0, badge }: {
+  label: string; value: number; max: number; color: string
+  onClick?: () => void; delay?: number; badge?: string
+}) {
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => { const t = setTimeout(() => setMounted(true), delay + 80); return () => clearTimeout(t) }, [delay])
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0
+  return (
+    <div
+      onClick={onClick}
+      style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: onClick ? 'pointer' : 'default',
+        padding: '4px 6px', borderRadius: 7, margin: '0 -6px', transition: 'background .12s' }}
+      onMouseEnter={onClick ? e => (e.currentTarget as HTMLElement).style.background = 'var(--surface-3)' : undefined}
+      onMouseLeave={onClick ? e => (e.currentTarget as HTMLElement).style.background = 'transparent' : undefined}
+    >
+      <span style={{ width: 68, fontSize: 11, color, fontWeight: 600, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <div style={{ flex: 1, height: 6, background: 'var(--surface-3)', borderRadius: 99, overflow: 'hidden' }}>
+        <div style={{
+          width: mounted ? `${pct}%` : '0%', height: '100%', background: color, borderRadius: 99,
+          transition: 'width .55s cubic-bezier(0.34,1.2,0.64,1)',
+          minWidth: value > 0 && mounted ? 4 : 0,
+        }} />
+      </div>
+      <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx-1)', flexShrink: 0, minWidth: 28, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{value}</span>
+      {badge && <span style={{ fontSize: 9, color: '#ef4444', fontWeight: 700, flexShrink: 0 }}>{badge}</span>}
+    </div>
+  )
+}
+
+/* ─── section heading with count + optional action link ──────────── */
+function SectionHead({ label, count, action }: { label: string; count?: number; action?: { label: string; onClick: () => void } }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.1em' }}>{label}</span>
+      {count !== undefined && (
+        <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 99, background: 'var(--surface-2)', color: 'var(--tx-3)', border: '1px solid var(--border)' }}>{count}</span>
+      )}
+      <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+      {action && (
+        <button onClick={action.onClick} style={{ fontSize: 11, color: 'var(--info)', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', padding: 0, flexShrink: 0 }}>
+          {action.label} →
+        </button>
+      )}
+    </div>
+  )
+}
+
 /* ─── main ──────────────────────────────────────────────────────── */
 export default function Overview({ stats: _globalStats, bugs: allBugs, includeLegacy, onNavigateToBugs, onNavigateToClusters, onNavigateToTickets, onNavigateToPostHog }: {
   stats: DashboardStats
@@ -486,17 +623,14 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
   onNavigateToTickets?: () => void
   onNavigateToPostHog?: () => void
 }) {
-  void _globalStats // superseded by the range-scoped `stats` computed below
+  void _globalStats
 
-  // Captured once per mount rather than read live during render — Date.now() is an
-  // impure call and must not be invoked directly in the render body (react-hooks/purity).
+  const windowWidth = useWindowWidth()
+  const wide = windowWidth >= 1024
+
   const [nowMs] = useState(() => Date.now())
-
   const [dayRange, setDayRange] = useState<DayRange>(30)
 
-  // Overview-wide time filter — affects every stat card and chart below.
-  // Re-defaults whenever the legacy toggle flips (adjusting state on prop change,
-  // done during render rather than in an effect — see react.dev "you might not need an effect").
   const [range, setRange] = useState<RangeFilter>(() => includeLegacy ? 'all' : 'month')
   const [prevIncludeLegacy, setPrevIncludeLegacy] = useState(includeLegacy)
   if (includeLegacy !== prevIncludeLegacy) {
@@ -505,14 +639,43 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
   }
 
   const rangeStart = useMemo(() => rangeCutoff(range, nowMs), [range, nowMs])
-  const bugs = useMemo(
-    () => rangeStart ? allBugs.filter(b => new Date(b.timestamp_utc || b.created_at) >= rangeStart) : allBugs,
-    [allBugs, rangeStart]
-  )
+
+  const [activeSevs, setActiveSevs]     = useState<Set<string>>(new Set())
+  const [activeRoutes, setActiveRoutes] = useState<Set<string>>(new Set())
+
+  const toggleSev = (s: string) => setActiveSevs(prev => {
+    const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n
+  })
+  const toggleRoute = (r: string) => setActiveRoutes(prev => {
+    const n = new Set(prev); n.has(r) ? n.delete(r) : n.add(r); return n
+  })
+
+  const bugs = useMemo(() => {
+    let b = rangeStart ? allBugs.filter(b => new Date(b.timestamp_utc || b.created_at) >= rangeStart) : allBugs
+    if (activeSevs.size > 0)   b = b.filter(x => x.severity   && activeSevs.has(x.severity))
+    if (activeRoutes.size > 0) b = b.filter(x => x.routingToken && activeRoutes.has(x.routingToken))
+    return b
+  }, [allBugs, rangeStart, activeSevs, activeRoutes])
+
   const stats = useMemo(() => computeStats(bugs), [bugs])
 
   const cutoff    = new Date(nowMs - dayRange * 86_400_000).toISOString().slice(0, 10)
-  const chartDays = stats.dailyVolume.filter(d => d.date >= cutoff)
+  // Fill in zero-value days so the chart covers the full window with no whitespace
+  const chartDays = useMemo(() => {
+    const byDate = new Map(stats.dailyVolume.map(d => [d.date, d]))
+    const days: typeof stats.dailyVolume = []
+    for (let i = dayRange - 1; i >= 0; i--) {
+      const date = new Date(nowMs - i * 86_400_000).toISOString().slice(0, 10)
+      if (date >= cutoff) {
+        days.push(byDate.get(date) ?? {
+          date,
+          label: new Date(date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }),
+          P1: 0, P2: 0, P3: 0, P4: 0, none: 0, total: 0,
+        })
+      }
+    }
+    return days
+  }, [stats.dailyVolume, dayRange, cutoff, nowMs])
 
   const dateRange = useMemo(() => {
     if (!stats.dailyVolume.length) return ''
@@ -526,7 +689,6 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
   const yestCount    = useMemo(() => bugs.filter(b => (b.timestamp_utc || b.created_at).slice(0,10) === yesterdayStr).length, [bugs, yesterdayStr])
   const dupRate      = stats.total > 0 ? Math.round((stats.duplicateCount / stats.total) * 100) : 0
 
-  /* integration health — derived from all bugs in the selected range */
   const integ = useMemo(() => {
     const n  = Math.max(bugs.length, 1)
     const rb = bugs.filter(b => b.rollbar_id || b.rollbarItemId).length
@@ -542,20 +704,11 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
     }
   }, [bugs])
 
-  /* insight styles */
-  const ISTYLE: Record<string, { border: string; bg: string; col: string }> = {
-    critical: { border: 'rgba(255,123,114,.22)', bg: 'rgba(255,123,114,.06)', col: 'var(--danger)'  },
-    warning:  { border: 'rgba(227,179,65,.22)',  bg: 'rgba(227,179,65,.06)',  col: 'var(--warning)' },
-    action:   { border: 'rgba(163,113,247,.22)', bg: 'rgba(163,113,247,.06)', col: 'var(--purple)'  },
-    info:     { border: 'rgba(88,166,255,.18)',  bg: 'rgba(88,166,255,.06)',  col: 'var(--info)'    },
-  }
-
   const maxCluster = stats.errorClusters[0]?.count || 1
 
-  /* ── render ─────────────────────────────────────────────────── */
   return (
     <div style={{ flex: 1, overflowY: 'auto', background: 'var(--bg)' }}>
-      <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 24 }}>
+      <div style={{ padding: '16px 20px 32px', display: 'flex', flexDirection: 'column', gap: 28, maxWidth: 1400, margin: '0 auto', width: '100%' }}>
 
         <PageInfo storageKey="overview">
           A live snapshot of the whole bug pipeline: KPIs, volume trends, severity/status/routing/component
@@ -563,354 +716,348 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
           bar, slice, or KPI to jump to the matching bugs in Bug Reports.
         </PageInfo>
 
-        {/* 1 ── CRITICAL SUMMARY (top of page, minimal, no walls of numbers) ── */}
-        <section>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
-            <Divider label="Critical Summary" />
-            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-              {(Object.keys(RANGE_LABELS) as RangeFilter[]).map(r => (
-                <button key={r} onClick={() => setRange(r)} style={{
-                  padding: '4px 11px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-                  background: range === r ? 'var(--orange)' : 'var(--surface-2)',
-                  color:      range === r ? '#fff'          : 'var(--tx-2)',
-                  border:     `1px solid ${range === r ? 'var(--orange)' : 'var(--border)'}`,
-                  cursor: 'pointer', transition: 'all .12s', fontFamily: 'inherit', whiteSpace: 'nowrap',
-                }}>{RANGE_LABELS[r]}</button>
-              ))}
-            </div>
+        {/* B ── STICKY FILTER BAR ────────────────────────────────── */}
+        <div style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg)', borderBottom: '1px solid var(--border)', padding: '8px 0', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 3, background: 'var(--surface-2)', borderRadius: 7, padding: 3, flexShrink: 0 }}>
+            {(Object.keys(RANGE_LABELS) as RangeFilter[]).map(r => (
+              <button key={r} onClick={() => setRange(r)} style={{
+                padding: '3px 9px', borderRadius: 5, fontSize: 11, fontWeight: 600,
+                background: range === r ? 'var(--surface-1)' : 'transparent',
+                color: range === r ? 'var(--tx-1)' : 'var(--tx-3)',
+                border: range === r ? '1px solid var(--border)' : '1px solid transparent',
+                cursor: 'pointer', transition: 'all .12s', fontFamily: 'inherit',
+              }}>{RANGE_LABELS[r]}</button>
+            ))}
           </div>
+          <div style={{ width: 1, height: 20, background: 'var(--border)', flexShrink: 0 }} />
+          {(['P1','P2','P3','P4'] as const).map(s => (
+            <button key={s} onClick={() => toggleSev(s)} style={{
+              padding: '3px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700,
+              background: activeSevs.has(s) ? SEV[s]+'22' : 'transparent',
+              color: activeSevs.has(s) ? SEV[s] : 'var(--tx-3)',
+              border: `1px solid ${activeSevs.has(s) ? SEV[s]+'55' : 'var(--border)'}`,
+              cursor: 'pointer', transition: 'all .12s', fontFamily: 'inherit',
+            }}>{s}</button>
+          ))}
+          <div style={{ width: 1, height: 20, background: 'var(--border)', flexShrink: 0 }} />
+          {(['BACKEND','MOBILE','WEB'] as const).map(rt => {
+            const rc = ROUTING_COLORS[rt]
+            return (
+              <button key={rt} onClick={() => toggleRoute(rt)} style={{
+                padding: '3px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700,
+                background: activeRoutes.has(rt) ? rc.bg : 'transparent',
+                color: activeRoutes.has(rt) ? rc.color : 'var(--tx-3)',
+                border: `1px solid ${activeRoutes.has(rt) ? rc.border : 'var(--border)'}`,
+                cursor: 'pointer', transition: 'all .12s', fontFamily: 'inherit',
+              }}>{rt}</button>
+            )
+          })}
+          {(activeSevs.size > 0 || activeRoutes.size > 0) && (
+            <button onClick={() => { setActiveSevs(new Set()); setActiveRoutes(new Set()) }} style={{
+              marginLeft: 'auto', padding: '3px 9px', borderRadius: 6, fontSize: 11, color: 'var(--tx-3)',
+              background: 'transparent', border: '1px solid var(--border)', cursor: 'pointer', fontFamily: 'inherit',
+            }}>Clear</button>
+          )}
+          <span style={{ marginLeft: activeSevs.size > 0 || activeRoutes.size > 0 ? 0 : 'auto', fontSize: 11, color: 'var(--tx-3)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#3fb950', boxShadow: '0 0 5px #3fb95088', display: 'inline-block' }} />
+            {bugs.length} bug{bugs.length !== 1 ? 's' : ''} in view
+          </span>
+        </div>
 
-          <Card pad={16}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 18 }}>
-              {/* Severity */}
-              <div>
-                <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>Severity</p>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {(['P1', 'P2', 'P3', 'P4'] as const).map(s => {
-                    const n = bugs.filter(b => b.severity === s).length
-                    return (
-                      <button key={s} onClick={() => onNavigateToBugs({ severity: [s] })} style={{
-                        display: 'flex', alignItems: 'center', gap: 5, padding: '3px 9px', borderRadius: 20,
-                        background: n > 0 ? SEV[s] + '18' : 'var(--surface-2)',
-                        border: `1px solid ${n > 0 ? SEV[s] + '35' : 'var(--border)'}`,
-                        cursor: 'pointer', fontFamily: 'inherit',
-                      }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: n > 0 ? SEV[s] : 'var(--tx-3)' }}>{s}</span>
-                        <span style={{ fontSize: 13, fontWeight: 700, color: n > 0 ? SEV[s] : 'var(--tx-3)' }}>{n}</span>
-                      </button>
-                    )
-                  })}
+        {/* C ── HERO KPI TILES ──────────────────────────────────── */}
+        <section>
+          <SectionHead label="Key Metrics" count={bugs.length} />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
+            <KpiTile label="Total Bugs"   value={stats.total}            color="var(--tx-2)"    icon={<BarChart2 size={15}/>}      animDelay={0}   sub={dateRange} />
+            <KpiTile label="P1 Critical"  value={stats.p1count}          color="#ef4444"         icon={<AlertTriangle size={15}/>}  animDelay={60}  sub="needs immediate action" onClick={() => onNavigateToBugs({ severity: ['P1'] })} delta={{ n: todayCount - yestCount, label: 'vs yesterday' }} />
+            <KpiTile label="P2 High"      value={stats.p2count}          color="#f59e0b"         icon={<TrendingUp size={15}/>}     animDelay={120} sub="high priority" onClick={() => onNavigateToBugs({ severity: ['P2'] })} />
+            <KpiTile label="Resolved"     value={stats.resolvedRate}     color="#3fb950"         icon={<CheckCircle2 size={15}/>}   animDelay={180} valueSuffix="%" sub={`${bugs.filter(b => b.status === 'complete').length} complete`} trendGood />
+            <KpiTile label="Needs Review" value={stats.needsHumanReview} color="#a371f7"         icon={<Sparkles size={15}/>}       animDelay={240} sub="low-confidence triage" onClick={() => onNavigateToBugs({ labels: ['needs-human-review'] })} />
+            <KpiTile label="Jira Gap"     value={stats.pendingNoJira}    color={stats.pendingNoJira > 0 ? '#f59e0b' : 'var(--tx-3)'} icon={<XCircle size={15}/>} animDelay={300} sub="bugs without ticket" onClick={() => onNavigateToBugs({ hasJira: 'no' })} />
+            <KpiTile label="Duplicates"   value={stats.duplicateCount}   color="#6b7280"         icon={<Link size={15}/>}           animDelay={360} sub={`${dupRate}% of total`} onClick={onNavigateToClusters} />
+            <KpiTile label="Jira Pending" value={stats.jiraPendingCount} color={stats.jiraPendingCount > 0 ? '#f59e0b' : 'var(--tx-3)'} icon={<TicketIcon size={15}/>} animDelay={420} sub="ticket creation failed" onClick={() => onNavigateToBugs({ jiraPending: 'yes' })} />
+          </div>
+        </section>
+
+        {/* D ── TWO-COLUMN MAIN GRID ────────────────────────────── */}
+        <section>
+          <div style={{ display: 'grid', gridTemplateColumns: wide ? 'minmax(0,1fr) minmax(0,380px)' : '1fr', gap: 16 }}>
+
+            {/* LEFT column */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+
+              {/* Daily Volume Chart */}
+              <Card pad={20}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                  <div>
+                    <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 2 }}>Daily Bug Volume</p>
+                    <p style={{ fontSize: 11, color: 'var(--tx-3)' }}>Stacked by severity · click a bar to filter</p>
+                  </div>
+                  <div style={{ display: 'flex', gap: 3, background: 'var(--surface-2)', borderRadius: 7, padding: 3 }}>
+                    {([7, 14, 30] as DayRange[]).map(r => (
+                      <button key={r} onClick={() => setDayRange(r)} style={{
+                        padding: '4px 10px', borderRadius: 5, fontSize: 11, fontWeight: 600,
+                        background: dayRange === r ? 'var(--surface-1)' : 'transparent',
+                        color: dayRange === r ? 'var(--tx-1)' : 'var(--tx-3)',
+                        border: dayRange === r ? '1px solid var(--border)' : '1px solid transparent',
+                        cursor: 'pointer', transition: 'all .12s', fontFamily: 'inherit',
+                      }}>{r}d</button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+                {chartDays.length === 0 ? (
+                  <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No data for this date range</p>
+                  </div>
+                ) : (
+                  <>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <AreaChart data={chartDays} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
+                        <defs>
+                          <linearGradient id="gP1"   x1="0" y1="0" x2="0" y2="1"><stop offset="5%"  stopColor="#ef4444" stopOpacity={0.6}/><stop offset="95%" stopColor="#ef4444" stopOpacity={0.05}/></linearGradient>
+                          <linearGradient id="gP2"   x1="0" y1="0" x2="0" y2="1"><stop offset="5%"  stopColor="#f59e0b" stopOpacity={0.6}/><stop offset="95%" stopColor="#f59e0b" stopOpacity={0.05}/></linearGradient>
+                          <linearGradient id="gP3"   x1="0" y1="0" x2="0" y2="1"><stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.6}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0.05}/></linearGradient>
+                          <linearGradient id="gP4"   x1="0" y1="0" x2="0" y2="1"><stop offset="5%"  stopColor="#6b7280" stopOpacity={0.5}/><stop offset="95%" stopColor="#6b7280" stopOpacity={0.05}/></linearGradient>
+                          <linearGradient id="gNone" x1="0" y1="0" x2="0" y2="1"><stop offset="5%"  stopColor="#3d444d" stopOpacity={0.4}/><stop offset="95%" stopColor="#3d444d" stopOpacity={0.02}/></linearGradient>
+                        </defs>
+                        <CartesianGrid vertical={false} stroke="rgba(48,54,61,.5)" strokeDasharray="3 6" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#7d8590' }} axisLine={false} tickLine={false} interval={dayRange === 7 ? 0 : dayRange === 14 ? 1 : 'preserveStartEnd'} />
+                        <YAxis tick={{ fontSize: 11, fill: '#7d8590' }} axisLine={false} tickLine={false} width={28} allowDecimals={false} />
+                        <Tooltip content={<ChartTip />} />
+                        <Area type="monotone" dataKey="none" stackId="s" stroke="#3d444d" strokeWidth={1.5} fill="url(#gNone)" isAnimationActive={false} />
+                        <Area type="monotone" dataKey="P4"   stackId="s" stroke={CHART_FILL.P4} strokeWidth={1.5} fill="url(#gP4)"   isAnimationActive={false} />
+                        <Area type="monotone" dataKey="P3"   stackId="s" stroke={CHART_FILL.P3} strokeWidth={1.5} fill="url(#gP3)"   isAnimationActive={false} />
+                        <Area type="monotone" dataKey="P2"   stackId="s" stroke={CHART_FILL.P2} strokeWidth={1.5} fill="url(#gP2)"   isAnimationActive={false} />
+                        <Area type="monotone" dataKey="P1"   stackId="s" stroke={CHART_FILL.P1} strokeWidth={1.5} fill="url(#gP1)"   isAnimationActive={false} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                    <div style={{ display: 'flex', gap: 16, marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
+                      {[['P1 Critical','#ef4444'],['P2 High','#f59e0b'],['P3 Medium','#3b82f6'],['P4 / None','#3d444d']].map(([l,c]) => (
+                        <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                          <span style={{ width: 10, height: 10, borderRadius: 2, background: c, display: 'inline-block' }} />
+                          <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{l}</span>
+                        </div>
+                      ))}
+                      <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--tx-3)', fontVariantNumeric: 'tabular-nums' }}>
+                        {chartDays.reduce((s, d) => s + d.total, 0)} total in window
+                      </span>
+                    </div>
+                  </>
+                )}
+              </Card>
 
-              {/* Source (counts only, no percentages) */}
-              <div>
-                <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>Source</p>
-                <div style={{ display: 'flex', gap: 12 }}>
-                  {([
-                    ['Rollbar', bugs.filter(b => b.source === 'rollbar_auto').length],
-                    ['CloudWatch', bugs.filter(b => b.source === 'cloudwatch_poller').length],
-                    ['User-reported', bugs.filter(b => b.source === 'user_report' || b.source === 'yuzee_app').length],
-                  ] as [string, number][]).map(([label, n]) => (
-                    <div key={label}>
-                      <p style={{ fontSize: 16, fontWeight: 800, color: 'var(--tx-1)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{n}</p>
+              {/* Top Error Clusters */}
+              <Card pad={20}>
+                <SectionHead
+                  label="Top Error Clusters"
+                  count={stats.errorClusters.length}
+                  action={onNavigateToClusters ? { label: 'View all', onClick: onNavigateToClusters } : undefined}
+                />
+                {stats.errorClusters.length === 0 ? (
+                  <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No error clusters detected</p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {stats.errorClusters.slice(0, 8).map((c, i) => {
+                      const sev   = c.dominantSeverity || 'unknown'
+                      const col   = SEV[sev] ?? 'var(--tx-3)'
+                      const route = (c.routingTokens[0] as 'BACKEND' | 'MOBILE' | 'WEB' | undefined) ?? null
+                      const rc    = route ? ROUTING_COLORS[route] : null
+                      const critP = c.count > 0 ? Math.round(((c.severities.P1 || 0) + (c.severities.P2 || 0)) / c.count * 100) : 0
+                      return (
+                        <div key={i} onClick={() => onNavigateToBugs({ search: c.normalizedKey.slice(0, 40) })}
+                          style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px', background:'var(--surface-2)', borderRadius:9, borderLeft:`3px solid ${col}`, cursor:'pointer', transition:'opacity .12s, transform .12s' }}
+                          onMouseEnter={e=>{ (e.currentTarget as HTMLElement).style.opacity='.8'; (e.currentTarget as HTMLElement).style.transform='translateX(2px)' }}
+                          onMouseLeave={e=>{ (e.currentTarget as HTMLElement).style.opacity='1'; (e.currentTarget as HTMLElement).style.transform='none' }}
+                        >
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:4, flexWrap:'wrap' }}>
+                              <span style={{ fontSize:10, fontWeight:700, padding:'1px 6px', borderRadius:4, background:col+'18', color:col, border:`1px solid ${col}28` }}>{sev}</span>
+                              {rc && <span style={{ fontSize:9, fontWeight:700, padding:'1px 5px', borderRadius:3, background:rc.bg, color:rc.color, border:`1px solid ${rc.border}` }}>{route}</span>}
+                              {c.topComponent && <span style={{ fontSize:9, color:'var(--tx-3)', background:'var(--surface-3)', padding:'1px 5px', borderRadius:3 }}>{c.topComponent}</span>}
+                              {critP>50 && <span style={{ fontSize:9, color:'var(--danger)', fontWeight:700 }}>{critP}% critical</span>}
+                            </div>
+                            <p className="font-mono" style={{ fontSize:11, color:'var(--tx-2)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                              {c.description.length>70 ? c.description.slice(0,70)+'…' : c.description}
+                            </p>
+                            <div style={{ height:3, background:'var(--surface-3)', borderRadius:99, marginTop:6, overflow:'hidden' }}>
+                              <div style={{ width:`${(c.count/maxCluster)*100}%`, height:'100%', background:col+'99', borderRadius:99 }} />
+                            </div>
+                          </div>
+                          <span className="font-brand" style={{ fontSize:20, fontWeight:800, color:'var(--tx-1)', flexShrink:0, fontVariantNumeric:'tabular-nums', lineHeight:1 }}>{c.count}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </Card>
+            </div>
+
+            {/* RIGHT column */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
+
+              {/* Distribution */}
+              <Card pad={18}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 16 }}>Distribution</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                  <div>
+                    <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8 }}>Severity</p>
+                    {(['P1','P2','P3','P4'] as const).map((s, i) => {
+                      const n = bugs.filter(b => b.severity === s).length
+                      return <AnimBar key={s} label={s} value={n} max={stats.total || 1} color={SEV[s]} onClick={() => onNavigateToBugs({ severity: [s] })} delay={i * 80} />
+                    })}
+                  </div>
+                  <div>
+                    <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8 }}>Status</p>
+                    {[
+                      { label:'complete', color:'#3fb950' },
+                      { label:'triaging', color:'#a371f7' },
+                      { label:'pending',  color:'#e3b341' },
+                      { label:'resolved', color:'#58a6ff' },
+                    ].map(({ label, color }, i) => (
+                      <AnimBar key={label} label={label} value={bugs.filter(b => b.status === label).length} max={stats.total || 1} color={color} onClick={() => onNavigateToBugs({ status: [label] })} delay={100 + i * 70} />
+                    ))}
+                  </div>
+                  <div>
+                    <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8 }}>Routing</p>
+                    {stats.routingBreakdown.slice(0,4).map((r, i) => {
+                      const col = r.routing === 'BACKEND' ? '#a371f7' : r.routing === 'MOBILE' ? '#2dd4bf' : r.routing === 'WEB' ? '#3fb950' : 'var(--tx-3)'
+                      return <AnimBar key={r.routing} label={r.routing} value={r.count} max={stats.routingBreakdown[0]?.count || 1} color={col} onClick={() => onNavigateToBugs({ platform: [r.routing] })} delay={200 + i * 60} badge={r.P1 > 0 ? `P1:${r.P1}` : undefined} />
+                    })}
+                  </div>
+                  <div>
+                    <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8 }}>Component</p>
+                    {stats.componentBreakdown.slice(0,5).map((c, i) => (
+                      <AnimBar key={c.component} label={c.component} value={c.count} max={stats.componentBreakdown[0]?.count || 1} color="#f97316" onClick={() => onNavigateToBugs({ component: [c.component] })} delay={280 + i * 55} badge={c.P1 > 0 ? `P1:${c.P1}` : undefined} />
+                    ))}
+                  </div>
+                </div>
+              </Card>
+
+              <PipelineWidget />
+
+              {/* Jira Coverage */}
+              <Card pad={16}>
+                <p style={{ fontSize: 11, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 12 }}>Jira Coverage</p>
+                <div style={{ display: 'flex', gap: 16, marginBottom: 12 }}>
+                  {[
+                    { label: 'Ticketed', value: bugs.filter(b => !!b.jira_key).length, color: '#3fb950' },
+                    { label: 'Missing',  value: stats.pendingNoJira,                   color: stats.pendingNoJira > 0 ? '#e3b341' : 'var(--tx-3)' },
+                    { label: 'Failed',   value: stats.jiraPendingCount,                color: stats.jiraPendingCount > 0 ? '#ef4444' : 'var(--tx-3)' },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} style={{ textAlign: 'center', flex: 1 }}>
+                      <p className="font-brand" style={{ fontSize: 26, fontWeight: 800, color, fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>{value}</p>
                       <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>{label}</p>
                     </div>
                   ))}
                 </div>
-              </div>
-
-              {/* Jira coverage */}
-              <div onClick={() => onNavigateToBugs({ hasJira: 'no' })} style={{ cursor: 'pointer' }}>
-                <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>Jira Coverage</p>
-                <div style={{ display: 'flex', gap: 12 }}>
-                  <div>
-                    <p style={{ fontSize: 16, fontWeight: 800, color: '#3fb950', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{bugs.filter(b => !!b.jira_key).length}</p>
-                    <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>Have ticket</p>
-                  </div>
-                  <div>
-                    <p style={{ fontSize: 16, fontWeight: 800, color: stats.pendingNoJira > 0 ? '#e3b341' : 'var(--tx-1)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{stats.pendingNoJira}</p>
-                    <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>Missing</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Pending / in-review */}
-              <div onClick={() => onNavigateToBugs({ status: ['pending'] })} style={{ cursor: 'pointer' }}>
-                <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>Pending / In Review</p>
-                <div style={{ display: 'flex', gap: 12 }}>
-                  <div>
-                    <p style={{ fontSize: 16, fontWeight: 800, color: 'var(--tx-1)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{bugs.filter(b => b.status === 'pending').length}</p>
-                    <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>Pending</p>
-                  </div>
-                  <div>
-                    <p style={{ fontSize: 16, fontWeight: 800, color: stats.needsHumanReview > 0 ? '#58a6ff' : 'var(--tx-1)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{stats.needsHumanReview}</p>
-                    <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 3 }}>In review</p>
-                  </div>
-                </div>
-              </div>
+                <AnimBar label="Coverage" value={bugs.filter(b => !!b.jira_key).length} max={stats.total || 1} color="#3fb950" delay={300} />
+              </Card>
             </div>
-          </Card>
-
-          {/* Secondary health row — smaller, subordinate to the summary above */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10, marginTop: 10 }}>
-            <Kpi label="Total Bugs"   value={stats.total}              sub={dateRange}                                icon={<BarChart2    size={14}/>} delta={{ n: todayCount - yestCount, label: 'vs yesterday' }} />
-            <Kpi label="Resolved"     value={`${stats.resolvedRate}%`} sub={`${bugs.filter(b => b.status === 'complete').length} complete`} accent="#3fb950" icon={<CheckCircle2 size={14}/>} trendGood />
-            <Kpi label="Duplicates"   value={stats.duplicateCount}     sub={`${dupRate}% total · ${stats.rollbarDuplicateCount} Rollbar`}    accent="#6b7280" icon={<Link         size={14}/>} onClick={onNavigateToClusters} />
-            <Kpi label="Jira Pending" value={stats.jiraPendingCount}    sub="ticket creation failed"                   warning={stats.jiraPendingCount > 0} icon={<XCircle      size={14}/>} onClick={() => onNavigateToBugs({ jiraPending: 'yes' })} />
           </div>
         </section>
 
-        {/* 2 ── VOLUME CHART (full width, capped bar size) ──────── */}
-        <section>
-          <Divider label="Bug Volume" />
-          <Card pad={20} style={{ marginTop: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20 }}>
-              <div>
-                <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>Daily Bug Volume</p>
-                <p style={{ fontSize: 11, color: 'var(--tx-3)' }}>Stacked by severity — showing {chartDays.length} day{chartDays.length !== 1 ? 's' : ''}</p>
-              </div>
-              <div style={{ display: 'flex', gap: 4 }}>
-                {([7, 14, 30] as DayRange[]).map(r => (
-                  <button key={r} onClick={() => setDayRange(r)} style={{
-                    padding: '4px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-                    background: dayRange === r ? 'var(--orange)' : 'var(--surface-2)',
-                    color:      dayRange === r ? '#fff'          : 'var(--tx-2)',
-                    border:     `1px solid ${dayRange === r ? 'var(--orange)' : 'var(--border)'}`,
-                    cursor: 'pointer', transition: 'all .12s', fontFamily: 'inherit',
-                  }}>{r}d</button>
-                ))}
-              </div>
-            </div>
-
-            {chartDays.length === 0 ? (
-              <div style={{ height: 220, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No data for this date range</p>
-              </div>
-            ) : (
-              <>
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart
-                    data={chartDays}
-                    maxBarSize={28}
-                    barCategoryGap="30%"
-                    margin={{ top: 4, right: 8, bottom: 0, left: -18 }}
-                  >
-                    <CartesianGrid vertical={false} stroke="rgba(48,54,61,.6)" strokeDasharray="3 6" />
-                    <XAxis
-                      dataKey="label"
-                      tick={{ fontSize: 11, fill: '#7d8590' }}
-                      axisLine={false} tickLine={false}
-                      interval={dayRange === 7 ? 0 : dayRange === 14 ? 1 : 'preserveStartEnd'}
-                    />
-                    <YAxis tick={{ fontSize: 11, fill: '#7d8590' }} axisLine={false} tickLine={false} width={28} allowDecimals={false} />
-                    <Tooltip content={<ChartTip />} cursor={{ fill: 'rgba(255,255,255,.03)' }} />
-                    <Bar dataKey="P1"   stackId="s" fill={CHART_FILL.P1}   isAnimationActive={false} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
-                    <Bar dataKey="P2"   stackId="s" fill={CHART_FILL.P2}   isAnimationActive={false} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
-                    <Bar dataKey="P3"   stackId="s" fill={CHART_FILL.P3}   isAnimationActive={false} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
-                    <Bar dataKey="P4"   stackId="s" fill={CHART_FILL.P4}   isAnimationActive={false} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
-                    <Bar dataKey="none" stackId="s" fill={CHART_FILL.none} isAnimationActive={false} radius={[3,3,0,0]} cursor="pointer" onClick={(d: { payload?: { date?: string } }) => d?.payload?.date && onNavigateToBugs({ dateFrom: d.payload.date, dateTo: d.payload.date })} />
-                  </BarChart>
-                </ResponsiveContainer>
-                <div style={{ display: 'flex', gap: 20, marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
-                  {[['P1 Critical','#ef4444'],['P2 High','#f59e0b'],['P3 Medium','#3b82f6'],['P4 / Unclassified','#3d444d']] .map(([l,c]) => (
-                    <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ width: 10, height: 10, borderRadius: 2, background: c, display: 'inline-block', flexShrink: 0 }} />
-                      <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>{l}</span>
-                    </div>
-                  ))}
-                  <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--tx-3)', fontVariantNumeric: 'tabular-nums' }}>
-                    {chartDays.reduce((s, d) => s + d.total, 0)} total in range
-                  </span>
-                </div>
-              </>
-            )}
-          </Card>
-        </section>
-
-        {/* 3 ── DISTRIBUTION (4 equal mini-cards) ──────────────── */}
-        <section>
-          <Divider label="Distribution" />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12, marginTop: 12 }}>
-
-            <DistCard title="Severity" onRowClick={s => onNavigateToBugs({ severity: [s] })} rows={
-              (['P1','P2','P3','P4'] as const).map(s => ({
-                label: s, color: SEV[s],
-                value: bugs.filter(b => b.severity === s).length,
-                max: stats.total || 1,
-              }))
-            } />
-
-            <DistCard title="Status" onRowClick={s => onNavigateToBugs({ status: [s] })} rows={[
-              { label: 'complete', color: '#3fb950', value: bugs.filter(b => b.status === 'complete').length, max: stats.total || 1 },
-              { label: 'triaging', color: '#a371f7', value: bugs.filter(b => b.status === 'triaging').length, max: stats.total || 1 },
-              { label: 'pending',  color: '#e3b341', value: bugs.filter(b => b.status === 'pending').length,  max: stats.total || 1 },
-              { label: 'resolved', color: '#58a6ff', value: bugs.filter(b => b.status === 'resolved').length, max: stats.total || 1 },
-            ]} />
-
-            <DistCard title="Routing" onRowClick={r => onNavigateToBugs({ platform: [r] })} rows={
-              stats.routingBreakdown.slice(0, 4).map(r => ({
-                label: r.routing,
-                color: r.routing === 'BACKEND' ? '#a371f7' : r.routing === 'MOBILE' ? '#2dd4bf' : r.routing === 'WEB' ? '#3fb950' : 'var(--tx-3)',
-                value: r.count, max: stats.routingBreakdown[0]?.count || 1,
-                badge: r.P1 > 0 ? `P1:${r.P1}` : undefined,
-              }))
-            } />
-
-            <DistCard title="Component" onRowClick={c => onNavigateToBugs({ component: [c] })} rows={
-              stats.componentBreakdown.slice(0, 5).map(c => ({
-                label: c.component, color: '#f97316',
-                value: c.count, max: stats.componentBreakdown[0]?.count || 1,
-                badge: c.P1 > 0 ? `P1:${c.P1}` : undefined,
-              }))
-            } />
-          </div>
-        </section>
-
-        {/* 4 ── INTEGRATIONS ────────────────────────────────────── */}
-        <section>
-          <Divider label="Bug Sources &amp; Integration Health" />
-          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 8, marginBottom: 10 }}>
-            Bugs enter via <strong style={{ color: 'var(--tx-2)' }}>Rollbar</strong> (auto-detected errors),{' '}
-            <strong style={{ color: 'var(--tx-2)' }}>CloudWatch</strong> (log scanning), or{' '}
-            <strong style={{ color: 'var(--tx-2)' }}>user submission</strong>.{' '}
-            All are then processed by n8n and triaged by Gemini — 100% of bugs go through that pipeline.
-          </p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12 }}>
-            <IntegCard name="Rollbar"        icon={<Radio      size={15}/>} color="#3b82f6" pct={integ.rollbar.pct}     detail={`${integ.rollbar.n} of ${integ.total} bugs — auto-detected backend/mobile errors with stack traces & occurrence counts`} />
-            <IntegCard name="CloudWatch"     icon={<Activity   size={15}/>} color="#2dd4bf" pct={integ.cloudwatch.pct}  detail={`${integ.cloudwatch.n} of ${integ.total} bugs have correlation_id — enables ±15 min CloudWatch log window links`} />
-            <IntegCard name="User-Reported"  icon={<Cloud      size={15}/>} color="#f97316" pct={integ.userReports.pct} detail={`${integ.userReports.n} of ${integ.total} bugs were manually submitted via the app — source: user_report / yuzee_app`} />
-            <IntegCard name="AI Triage"      icon={<Cpu        size={15}/>} color="#a371f7" pct={integ.aiTriage.pct}    detail={`${integ.aiTriage.n} of ${integ.total} bugs have Gemini-generated ai_summary — pipeline ${integ.aiTriage.pct > 50 ? 'healthy' : 'needs attention'}`} />
-          </div>
-        </section>
-
-        {/* 5 ── JIRA SPACES ─────────────────────────────────────── */}
-        <section>
-          <Divider label="Jira Spaces" />
-          <div style={{ marginTop: 12 }}>
-            <JiraSpacesPanel bugs={bugs} />
-          </div>
-        </section>
-
-        {/* 5b ── INTERNAL TICKETS ───────────────────────────────── */}
-        <section>
-          <Divider label="Internal Tickets" />
-          <div style={{ marginTop: 12 }}>
-            <TicketsWidget onNavigate={onNavigateToTickets} />
-          </div>
-        </section>
-
-        {/* 5c ── POSTHOG OVERVIEW ───────────────────────────────── */}
-        <section>
-          <Divider label="Product Analytics (PostHog)" />
-          <div style={{ marginTop: 12 }}>
-            <PostHogOverviewWidget onNavigate={onNavigateToPostHog} />
-          </div>
-        </section>
-
-        {/* 6 ── PIPELINE + INSIGHTS ─────────────────────────────── */}
-        <section>
-          <Divider label="Pipeline &amp; Insights" />
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 16, marginTop: 12 }}>
-            <PipelineWidget />
-            <Card>
-              <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>Actionable Insights</p>
-              <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Auto-derived from current data</p>
-              {stats.insights.length === 0 ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 12px', background: 'rgba(63,185,80,.06)', border: '1px solid rgba(63,185,80,.18)', borderRadius: 8 }}>
-                  <CheckCircle2 size={13} color="#3fb950" />
-                  <span style={{ fontSize: 12, color: '#3fb950' }}>No critical insights — all looks healthy</span>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {stats.insights.slice(0, 5).map((ins, i) => {
-                    const s = ISTYLE[ins.type] ?? ISTYLE.info
-                    return (
-                      <div key={i} style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 8, padding: '10px 12px' }}>
-                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                          {ins.type === 'critical' && <AlertTriangle size={13} color={s.col} style={{ flexShrink: 0, marginTop: 1 }} />}
-                          {ins.type === 'warning'  && <TrendingUp    size={13} color={s.col} style={{ flexShrink: 0, marginTop: 1 }} />}
-                          {ins.type === 'action'   && <Zap           size={13} color={s.col} style={{ flexShrink: 0, marginTop: 1 }} />}
-                          {ins.type === 'info'     && <Info          size={13} color={s.col} style={{ flexShrink: 0, marginTop: 1 }} />}
-                          <div style={{ flex: 1 }}>
-                            <p style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx-1)', marginBottom: 2, lineHeight: 1.4 }}>{ins.title}</p>
-                            <p style={{ fontSize: 11, color: 'var(--tx-2)', lineHeight: 1.5 }}>{ins.body}</p>
-                            <span style={{ display: 'inline-block', marginTop: 5, fontSize: 10, fontWeight: 700, padding: '1px 8px', borderRadius: 99, background: s.bg, color: s.col, border: `1px solid ${s.border}` }}>{ins.metric}</span>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </Card>
-          </div>
-        </section>
-
-        {/* 7 ── ERROR CLUSTERS ──────────────────────────────────── */}
-        <section>
-          <Divider label="Top Error Clusters" />
-          <Card pad={20} style={{ marginTop: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16 }}>
-              <div>
-                <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 2 }}>Grouped by error pattern</p>
-                <p style={{ fontSize: 11, color: 'var(--tx-3)' }}>Click any row to open filtered bug list</p>
-              </div>
-              <span style={{ fontSize: 11, color: 'var(--tx-3)', background: 'var(--surface-2)', border: '1px solid var(--border)', padding: '2px 9px', borderRadius: 99, fontVariantNumeric: 'tabular-nums' }}>
-                {stats.errorClusters.length} pattern{stats.errorClusters.length !== 1 ? 's' : ''}
-              </span>
-            </div>
-            {stats.errorClusters.length === 0 ? (
-              <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No clusters detected yet</p>
-            ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 8 }}>
-                {stats.errorClusters.slice(0, 10).map((c, i) => {
-                  const sev   = c.dominantSeverity || 'unknown'
-                  const col   = SEV[sev] ?? 'var(--tx-3)'
-                  const route = (c.routingTokens[0] as 'BACKEND' | 'MOBILE' | 'WEB' | undefined) ?? null
-                  const rc    = route ? ROUTING_COLORS[route] : null
-                  const critP = c.count > 0 ? Math.round(((c.severities.P1 || 0) + (c.severities.P2 || 0)) / c.count * 100) : 0
+        {/* D2 ── RECENT P1/P2 + INSIGHTS (full width) ──────────── */}
+        {(() => {
+          const critBugs = bugs.filter(b => b.severity === 'P1' || b.severity === 'P2').slice(0, 6)
+          return critBugs.length === 0 ? null : (
+            <Card pad={20}>
+              <SectionHead label="Recent P1/P2 Bugs" count={critBugs.length} />
+              <div style={{ display: 'grid', gridTemplateColumns: wide ? 'repeat(3, minmax(0, 1fr))' : '1fr', gap: 2 }}>
+                {critBugs.map(b => {
+                  const col = b.severity === 'P1' ? '#ef4444' : '#f59e0b'
+                  const ts  = b.timestamp_utc || b.created_at
+                  const ms  = Date.now() - new Date(ts).getTime()
+                  const ago = ms < 3_600_000 ? `${Math.round(ms/60000)}m ago`
+                    : ms < 86_400_000 ? `${Math.round(ms/3_600_000)}h ago`
+                    : `${Math.round(ms/86_400_000)}d ago`
                   return (
-                    <div
-                      key={i}
-                      onClick={() => onNavigateToBugs({ search: c.normalizedKey.slice(0, 40) })}
-                      style={{
-                        display: 'flex', alignItems: 'flex-start', gap: 10,
-                        background: 'var(--surface-2)', borderRadius: 8, padding: '10px 12px',
-                        borderLeft: `3px solid ${col}`, cursor: 'pointer', transition: 'opacity .12s',
-                      }}
-                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.opacity = '.75'}
-                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.opacity = '1'}
+                    <div key={b.report_id} style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'9px 10px', borderRadius:8, transition:'background .12s', minWidth:0 }}
+                      onMouseEnter={e=>(e.currentTarget as HTMLElement).style.background='var(--surface-2)'}
+                      onMouseLeave={e=>(e.currentTarget as HTMLElement).style.background='transparent'}
                     >
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 5, flexWrap: 'wrap' }}>
-                          <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: col + '18', color: col, border: `1px solid ${col}28` }}>{sev}</span>
-                          {rc && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 3, background: rc.bg, color: rc.color, border: `1px solid ${rc.border}` }}>{route}</span>}
-                          {c.topComponent && <span style={{ fontSize: 9, color: 'var(--tx-3)', background: 'var(--surface-3)', padding: '1px 5px', borderRadius: 3 }}>{c.topComponent}</span>}
-                          {critP > 50 && <span style={{ fontSize: 9, color: 'var(--danger)', fontWeight: 700, background: 'rgba(255,123,114,.08)', border: '1px solid rgba(255,123,114,.2)', padding: '1px 5px', borderRadius: 3 }}>{critP}% critical</span>}
-                        </div>
-                        <p className="font-mono" style={{ fontSize: 11, color: 'var(--tx-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {c.description.length > 62 ? c.description.slice(0, 62) + '…' : c.description}
-                        </p>
-                        <div style={{ height: 3, background: 'var(--surface-3)', borderRadius: 99, marginTop: 6, overflow: 'hidden' }}>
-                          <div style={{ width: `${(c.count / maxCluster) * 100}%`, height: '100%', background: col + '99', borderRadius: 99 }} />
-                        </div>
+                      <span style={{ fontSize:10, fontWeight:700, padding:'2px 7px', borderRadius:99, background:col+'18', color:col, border:`1px solid ${col}30`, flexShrink:0, marginTop:1 }}>{b.severity}</span>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <p style={{ fontSize:12, color:'var(--tx-1)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{b.description?.slice(0,80) ?? b.report_id}</p>
+                        {b.ai_summary && <p style={{ fontSize:11, color:'var(--tx-3)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', marginTop:1 }}>{b.ai_summary}</p>}
                       </div>
-                      <span className="font-brand" style={{ fontSize: 18, fontWeight: 800, color: 'var(--tx-1)', flexShrink: 0, fontVariantNumeric: 'tabular-nums', lineHeight: 1, marginTop: 2 }}>{c.count}</span>
+                      <div style={{ flexShrink:0, textAlign:'right' }}>
+                        <p style={{ fontSize:10, color:'var(--tx-3)' }}>{ago}</p>
+                        {b.routingToken && <p style={{ fontSize:9, fontWeight:700, color: b.routingToken === 'BACKEND' ? '#a371f7' : b.routingToken === 'MOBILE' ? '#2dd4bf' : '#3fb950', marginTop:2 }}>{b.routingToken}</p>}
+                      </div>
                     </div>
                   )
                 })}
               </div>
-            )}
-          </Card>
+            </Card>
+          )
+        })()}
+
+        {/* Actionable Insights */}
+        <Card pad={20}>
+          <SectionHead label="Actionable Insights" count={stats.insights.length} />
+          {stats.insights.length === 0 ? (
+            <div style={{ display:'flex', alignItems:'center', gap:8, padding:'14px 12px', background:'rgba(63,185,80,.06)', border:'1px solid rgba(63,185,80,.18)', borderRadius:8 }}>
+              <CheckCircle2 size={13} color="#3fb950" />
+              <span style={{ fontSize:12, color:'#3fb950' }}>No critical insights — all looks healthy</span>
+            </div>
+          ) : (
+            <div style={{ display:'grid', gridTemplateColumns: wide ? 'repeat(2, 1fr)' : '1fr', gap:8 }}>
+              {stats.insights.slice(0, 6).map((ins, i) => {
+                const s = ISTYLE[ins.type] ?? ISTYLE.info
+                return (
+                  <div key={i} style={{ background:s.bg, border:`1px solid ${s.border}`, borderRadius:8, padding:'10px 12px' }}>
+                    <div style={{ display:'flex', alignItems:'flex-start', gap:8 }}>
+                      {ins.type === 'critical' && <AlertTriangle size={13} color={s.col} style={{ flexShrink:0, marginTop:1 }} />}
+                      {ins.type === 'warning'  && <TrendingUp    size={13} color={s.col} style={{ flexShrink:0, marginTop:1 }} />}
+                      {ins.type === 'action'   && <Zap           size={13} color={s.col} style={{ flexShrink:0, marginTop:1 }} />}
+                      {ins.type === 'info'     && <Info          size={13} color={s.col} style={{ flexShrink:0, marginTop:1 }} />}
+                      <div style={{ flex:1 }}>
+                        <p style={{ fontSize:12, fontWeight:700, color:'var(--tx-1)', marginBottom:2, lineHeight:1.4 }}>{ins.title}</p>
+                        <p style={{ fontSize:11, color:'var(--tx-2)', lineHeight:1.5 }}>{ins.body}</p>
+                        <span style={{ display:'inline-block', marginTop:5, fontSize:10, fontWeight:700, padding:'1px 8px', borderRadius:99, background:s.bg, color:s.col, border:`1px solid ${s.border}` }}>{ins.metric}</span>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </Card>
+
+        {/* E ── INTEGRATION HEALTH ───────────────────────────────── */}
+        <section>
+          <SectionHead label="Integration Health" />
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${wide ? 4 : 2}, minmax(0, 1fr))`, gap: 12 }}>
+            <IntegCard name="Rollbar"       icon={<Radio    size={15}/>} color="#3b82f6" pct={integ.rollbar.pct}     detail={`${integ.rollbar.n} of ${integ.total} bugs — auto-detected errors with stack traces`} />
+            <IntegCard name="CloudWatch"    icon={<Activity size={15}/>} color="#2dd4bf" pct={integ.cloudwatch.pct}  detail={`${integ.cloudwatch.n} of ${integ.total} bugs have correlation_id`} />
+            <IntegCard name="User-Reported" icon={<Cloud    size={15}/>} color="#f97316" pct={integ.userReports.pct} detail={`${integ.userReports.n} of ${integ.total} bugs were manually submitted`} />
+            <IntegCard name="AI Triage"     icon={<Cpu      size={15}/>} color="#a371f7" pct={integ.aiTriage.pct}    detail={`${integ.aiTriage.n} of ${integ.total} bugs have Gemini ai_summary`} />
+          </div>
         </section>
 
-        {/* 8 ── SECONDARY BREAKDOWNS ────────────────────────────── */}
+        {/* F ── JIRA SPACES ─────────────────────────────────────── */}
         <section>
-          <Divider label="Breakdown Details" />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 16, marginTop: 12 }}>
+          <SectionHead label="Jira Spaces" />
+          <JiraSpacesPanel bugs={bugs} />
+        </section>
 
-            {/* Category */}
+        {/* G ── INTERNAL TICKETS ────────────────────────────────── */}
+        <section>
+          <SectionHead label="Internal Tickets" />
+          <TicketsWidget onNavigate={onNavigateToTickets} />
+        </section>
+
+        {/* H ── POSTHOG ─────────────────────────────────────────── */}
+        <section>
+          <SectionHead label="Product Analytics (PostHog)" />
+          <PostHogOverviewWidget onNavigate={onNavigateToPostHog} />
+        </section>
+
+        {/* I ── SECONDARY BREAKDOWNS ────────────────────────────── */}
+        <section>
+          <SectionHead label="Breakdown Details" />
+          <div style={{ display: 'grid', gridTemplateColumns: wide ? 'repeat(3, minmax(0, 1fr))' : '1fr', gap: 16 }}>
+
             <Card pad={16}>
               <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>By Category</p>
               <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>AI triage classification</p>
@@ -918,7 +1065,7 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
                 ? <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No category data yet</p>
                 : stats.categoryBreakdown.slice(0, 7).map(c => {
                     const maxCat = stats.categoryBreakdown[0]?.count || 1
-                    const col = c.P1 > 0 ? 'var(--danger)' : c.P2 > 0 ? 'var(--warning)' : 'var(--info)'
+                    const col    = c.P1 > 0 ? 'var(--danger)' : c.P2 > 0 ? 'var(--warning)' : 'var(--info)'
                     return (
                       <div key={c.category} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 9 }}>
                         <span style={{ width: 92, fontSize: 11, color: 'var(--tx-2)', textTransform: 'capitalize', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.category.replace(/_/g, ' ')}</span>
@@ -930,7 +1077,6 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
               }
             </Card>
 
-            {/* Version */}
             <Card pad={16}>
               <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>By App Version</p>
               <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>P1+P2 = release risk indicator</p>
@@ -956,7 +1102,6 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
               }
             </Card>
 
-            {/* Peak Hours */}
             <Card pad={16}>
               <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>Peak Hours (UTC)</p>
               <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Hourly bug arrival pattern</p>
@@ -965,7 +1110,7 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
                 : (
                   <div role="img" aria-label="Bug count by UTC hour" style={{ display: 'flex', gap: 2, alignItems: 'flex-end', height: 80 }}>
                     {stats.hourlyVolume.map(h => {
-                      const maxH = Math.max(...stats.hourlyVolume.map(x => x.count), 1)
+                      const maxH  = Math.max(...stats.hourlyVolume.map(x => x.count), 1)
                       const isPeak = h.count === maxH
                       return (
                         <div key={h.hour} title={`${h.hour}:00 UTC — ${h.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
@@ -997,11 +1142,10 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
           </div>
         </section>
 
-        {/* 9 ── ENVIRONMENT + SOURCE ────────────────────────────── */}
+        {/* J ── ENVIRONMENT & SOURCE ────────────────────────────── */}
         <section>
-          <Divider label="Environment &amp; Source" />
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 16, marginTop: 12 }}>
-
+          <SectionHead label="Environment &amp; Source" />
+          <div style={{ display: 'grid', gridTemplateColumns: wide ? 'minmax(0,1fr) minmax(0,1fr)' : '1fr', gap: 16 }}>
             <Card pad={16}>
               <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>By Environment</p>
               <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Where bugs are occurring</p>
@@ -1031,16 +1175,15 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
                   })
               }
             </Card>
-
             <Card pad={16}>
               <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>Report Sources</p>
-              <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Where reports originate — counts only, all data comes from n8n automations</p>
+              <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Where reports originate</p>
               {bugs.length === 0
                 ? <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No source data yet</p>
                 : ([
-                    ['Rollbar', bugs.filter(b => b.source === 'rollbar_auto').length, 'var(--info)'],
-                    ['CloudWatch', bugs.filter(b => b.source === 'cloudwatch_poller').length, '#2dd4bf'],
-                    ['User-reported', bugs.filter(b => b.source === 'user_report' || b.source === 'yuzee_app').length, 'var(--warning)'],
+                    ['Rollbar',       bugs.filter(b => b.source === 'rollbar_auto').length,                               'var(--info)'],
+                    ['CloudWatch',    bugs.filter(b => b.source === 'cloudwatch_poller').length,                          '#2dd4bf'],
+                    ['User-reported', bugs.filter(b => b.source === 'user_report' || b.source === 'yuzee_app').length,    'var(--warning)'],
                   ] as [string, number, string][]).map(([label, n, col]) => (
                     <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
                       <span style={{ width: 96, fontSize: 11, color: 'var(--tx-2)', flexShrink: 0 }}>{label}</span>
@@ -1050,14 +1193,13 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
                     </div>
                   ))
               }
-              {/* Module mini-grid */}
               {stats.moduleBreakdown.length > 0 && (
                 <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
                   <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 10 }}>By Module</p>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
                     {stats.moduleBreakdown.map(m => {
+                      const COLS: Record<string, string> = { WEB: 'var(--module-web)', APP: 'var(--module-app)', BACKEND: 'var(--module-be)', INFRASTRUCTURE: 'var(--module-infra)' }
                       const ICONS: Record<string, React.ReactNode> = { WEB: <Globe size={13}/>, APP: <Smartphone size={13}/>, BACKEND: <Server size={13}/>, INFRASTRUCTURE: <Database size={13}/> }
-                      const COLS:  Record<string, string>           = { WEB: 'var(--module-web)', APP: 'var(--module-app)', BACKEND: 'var(--module-be)', INFRASTRUCTURE: 'var(--module-infra)' }
                       const col = COLS[m.module] || 'var(--orange)'
                       return (
                         <div key={m.module} style={{ background: 'var(--surface-2)', borderRadius: 8, padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1077,11 +1219,11 @@ export default function Overview({ stats: _globalStats, bugs: allBugs, includeLe
           </div>
         </section>
 
-        {/* 10 ── TOP ENDPOINTS (conditional) ──────────────────────*/}
+        {/* K ── TOP ENDPOINTS (conditional) ────────────────────── */}
         {stats.topPageUrls.length > 0 && (
           <section>
-            <Divider label="Top Affected Endpoints" />
-            <Card pad={20} style={{ marginTop: 12 }}>
+            <SectionHead label="Top Affected Endpoints" />
+            <Card pad={20}>
               <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', fontFamily: 'Space Grotesk, sans-serif', marginBottom: 3 }}>Highest-impact routes</p>
               <p style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 14 }}>Extracted from bug context data</p>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>

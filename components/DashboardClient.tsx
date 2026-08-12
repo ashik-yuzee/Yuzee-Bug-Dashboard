@@ -29,12 +29,13 @@ import {
   BarChart3, List, Layers, WifiOff, Radio, Bell, Code2, FileText,
   Activity, AlertTriangle, X, History, ShieldCheck, MessageSquare, Calendar,
   Ticket as TicketIcon, ChevronsLeft, ChevronsRight, BookOpen, BarChart2,
-  Sun, Moon, Server,
+  Sun, Moon, Server, Download,
 } from 'lucide-react'
 import { useTheme } from '@/components/ThemeProvider'
 import Reports from './Reports'
 import PostHogTab from './PostHogTab'
 import ServerHealthPage from './ServerHealthPage'
+import LogExportTab from './LogExportTab'
 import { isLegacy, LEGACY_CUTOFF_ISO } from '@/lib/utils'
 
 export type BugReport = {
@@ -320,7 +321,7 @@ export type Filters = {
 export type SortConfig = { key: keyof BugReport; dir: 'asc' | 'desc' }
 export type PipelineSubTab = 'queue' | 'quality' | 'cloudwatch'
 export type TriageSubTab = 'rules' | 'feedback' | 'jira'
-type Tab = 'overview' | 'bugs' | 'clusters' | 'pipeline' | 'triage' | 'feedback' | 'developer' | 'reports' | 'daily' | 'tickets' | 'posthog' | 'server-health' | 'guide'
+type Tab = 'overview' | 'bugs' | 'clusters' | 'pipeline' | 'triage' | 'feedback' | 'developer' | 'reports' | 'daily' | 'tickets' | 'posthog' | 'server-health' | 'guide' | 'log-export'
 export type TicketsSubTab = 'board' | 'list'
 
 export const BLANK_FILTERS: Filters = {
@@ -430,7 +431,7 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
   // Cookie takes priority (no flash on refresh). Hash still works for shared links.
   useLayoutEffect(() => {
     if (initialTab) return
-    const VALID_TABS: Tab[] = ['overview','bugs','clusters','pipeline','triage','feedback','developer','reports','daily','tickets','posthog','server-health','guide']
+    const VALID_TABS: Tab[] = ['overview','bugs','clusters','pipeline','triage','feedback','developer','reports','daily','tickets','posthog','server-health','guide','log-export']
     const hash = window.location.hash.slice(1) as Tab
     if (VALID_TABS.includes(hash)) _setActiveTab(hash)
   }, [initialTab])
@@ -645,8 +646,9 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
     { id: 'reports',   label: 'Reports',         icon: <FileText      size={14} aria-hidden /> },
     { id: 'daily',     label: 'Daily Digest',    icon: <Calendar      size={14} aria-hidden /> },
     { id: 'tickets',   label: 'Tickets',         icon: <TicketIcon    size={14} aria-hidden />, badge: openTicketCount },
-    { id: 'posthog',        label: 'PostHog',        icon: <BarChart2 size={14} aria-hidden /> },
-    { id: 'server-health', label: 'Server Health',  icon: <Server    size={14} aria-hidden /> },
+    { id: 'posthog',        label: 'PostHog',        icon: <BarChart2  size={14} aria-hidden /> },
+    { id: 'server-health', label: 'Server Health',  icon: <Server     size={14} aria-hidden /> },
+    { id: 'log-export',    label: 'Log Export',     icon: <Download   size={14} aria-hidden /> },
   ]
 
   const showJiraBanner    = jiraPendingCount > 0 && !dismissedBanners.has('jira')
@@ -1125,6 +1127,10 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
 
             {activeTab === 'guide' && (
               <GuideTab />
+            )}
+
+            {activeTab === 'log-export' && (
+              <LogExportTab />
             )}
           </ErrorBoundary>
         </main>

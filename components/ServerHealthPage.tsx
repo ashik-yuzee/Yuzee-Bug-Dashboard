@@ -97,6 +97,11 @@ interface AnomalyRow {
   ai_analysis: string | null
   cloudwatch_url: string | null
   created_at: string
+  // grouping fields (added in anomaly_grouping_by_fingerprint migration)
+  error_fingerprint: string
+  occurrence_count: number
+  first_seen: string
+  last_seen: string
 }
 
 // ─── Colour constants (real hex — never CSS vars — so rgba alpha works) ──────
@@ -1147,6 +1152,18 @@ interface LighthouseResult {
   diagnostics: { id: string; title: string; description: string }[]
 }
 
+interface LighthouseAuditRow {
+  id: string
+  url: string
+  strategy: 'desktop' | 'mobile'
+  scores: LighthouseResult['scores']
+  metrics: LighthouseResult['metrics']
+  opportunities: LighthouseResult['opportunities']
+  diagnostics: LighthouseResult['diagnostics']
+  fetched_at: string   // snake_case from Supabase
+  created_at: string
+}
+
 function scoreGrade(s: number | null): { color: string; label: string } {
   if (s === null) return { color: C.muted, label: '?' }
   if (s >= 90) return { color: C.success, label: 'Good' }
@@ -1257,11 +1274,44 @@ const ALL_WEB_ROUTES: { label: string; path: string }[] = [
 ]
 
 function LighthouseAuditSection({ monitors }: { monitors: MonitorRow[] }) {
+  const supabase = useMemo(() => createClient(), [])
   const webMonitors = monitors.filter(m => m.enabled && isWebEndpoint(m.name) && m.target?.startsWith('http'))
   const [results, setResults] = useState<LHResults>({})
   const [runningAll, setRunningAll] = useState(false)
   const [mode, setMode] = useState<'monitors' | 'all'>('monitors')
   const [baseUrl, setBaseUrl] = useState('')
+  const [history, setHistory] = useState<LighthouseAuditRow[]>([])
+  const [historyLoading, setHistoryLoading] = useState(true)
+  const [showHistory, setShowHistory] = useState(false)
+
+  const thirtyDaysAgo = useMemo(() => new Date(Date.now() - 30 * 86_400_000).toISOString(), [])
+
+  const refreshHistory = useCallback(() => {
+    supabase
+      .from('lighthouse_audits')
+      .select('*')
+      .gte('created_at', thirtyDaysAgo)
+      .order('fetched_at', { ascending: false })
+      .limit(300)
+      .then(({ data }) => {
+        setHistory((data ?? []) as LighthouseAuditRow[])
+        setHistoryLoading(false)
+      })
+  }, [supabase, thirtyDaysAgo])
+
+  useEffect(() => { refreshHistory() }, [refreshHistory])
+
+  const saveAudit = useCallback(async (result: LighthouseResult, strategy: 'desktop' | 'mobile') => {
+    await supabase.from('lighthouse_audits').insert({
+      url: result.url, strategy,
+      scores: result.scores, metrics: result.metrics,
+      opportunities: result.opportunities, diagnostics: result.diagnostics,
+      fetched_at: result.fetchedAt,
+    })
+    // Prune records older than 30 days (best-effort, low-traffic table)
+    await supabase.from('lighthouse_audits').delete().lt('created_at', thirtyDaysAgo)
+    refreshHistory()
+  }, [supabase, thirtyDaysAgo, refreshHistory])
 
   const defaultBase = (() => {
     if (!webMonitors.length) return ''
@@ -1283,11 +1333,12 @@ function LighthouseAuditSection({ monitors }: { monitors: MonitorRow[] }) {
         const res  = await fetch(`/api/lighthouse?url=${encodeURIComponent(target)}&strategy=${strategy}`)
         const data = await res.json()
         setResults(prev => ({ ...prev, [lhKey(target, strategy)]: data }))
+        if (!('error' in data)) saveAudit(data as LighthouseResult, strategy)
       } catch {
         setResults(prev => ({ ...prev, [lhKey(target, strategy)]: { error: 'Network error' } }))
       }
     }))
-  }, [])
+  }, [saveAudit])
 
   const runAll = useCallback(async () => {
     setRunningAll(true)
@@ -1403,6 +1454,82 @@ function LighthouseAuditSection({ monitors }: { monitors: MonitorRow[] }) {
             </div>
           )
         })}
+      </div>
+
+      {/* ── Audit History ── */}
+      <div style={{ borderTop: '1px solid var(--border)' }}>
+        <button
+          onClick={() => setShowHistory(h => !h)}
+          style={{
+            width: '100%', padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 8,
+            background: 'none', cursor: 'pointer', textAlign: 'left',
+          }}
+        >
+          <span style={{ fontSize: 10, color: 'var(--tx-3)', display: 'inline-block', width: 10, transform: showHistory ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>▶</span>
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx-2)' }}>Audit History</span>
+          <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>last 30 days</span>
+          {!historyLoading && (
+            <span style={{ fontSize: 10, padding: '1px 7px', borderRadius: 10, background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--tx-3)', marginLeft: 'auto' }}>
+              {history.length} saved
+            </span>
+          )}
+        </button>
+
+        {showHistory && (
+          <div style={{ padding: '0 20px 16px' }}>
+            {historyLoading ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {Array.from({ length: 3 }, (_, i) => <div key={i} className="skeleton" style={{ height: 36 }} />)}
+              </div>
+            ) : history.length === 0 ? (
+              <p style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic', margin: 0 }}>
+                No saved audits yet. Run an audit above to start building history.
+              </p>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ background: 'var(--surface-2)' }}>
+                      {['When (MYT)', 'URL', 'Strategy', 'Perf', 'A11y', 'BP', 'SEO', 'LCP', 'TBT'].map(h => (
+                        <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', fontSize: 9, letterSpacing: '.06em', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.map((row, i) => {
+                      const g = (s: number | null) => s === null ? C.muted : s >= 90 ? C.success : s >= 50 ? C.warning : C.danger
+                      const isLast = i === history.length - 1
+                      return (
+                        <tr key={row.id} style={{ borderBottom: isLast ? 'none' : '1px solid var(--border)' }}>
+                          <td style={{ padding: '6px 10px', color: 'var(--tx-3)', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 10 }}>
+                            {new Date(row.fetched_at).toLocaleString('en-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })}
+                          </td>
+                          <td style={{ padding: '6px 10px', color: 'var(--tx-2)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.url}>
+                            {row.url.replace(/^https?:\/\//, '')}
+                          </td>
+                          <td style={{ padding: '6px 10px' }}>
+                            <span style={{ fontSize: 10, fontWeight: 600, color: row.strategy === 'desktop' ? '#60a5fa' : '#34d399' }}>
+                              {row.strategy === 'desktop' ? '🖥 Desktop' : '📱 Mobile'}
+                            </span>
+                          </td>
+                          {[row.scores.performance, row.scores.accessibility, row.scores.bestPractices, row.scores.seo].map((s, si) => (
+                            <td key={si} style={{ padding: '6px 10px', fontWeight: 700, color: g(s), fontVariantNumeric: 'tabular-nums' }}>{s ?? '—'}</td>
+                          ))}
+                          <td style={{ padding: '6px 10px', color: g(row.metrics.lcp !== null ? (row.metrics.lcp <= 2500 ? 90 : row.metrics.lcp <= 4000 ? 60 : 30) : null), fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                            {row.metrics.lcp !== null ? `${row.metrics.lcp}ms` : '—'}
+                          </td>
+                          <td style={{ padding: '6px 10px', color: g(row.metrics.tbt !== null ? (row.metrics.tbt <= 200 ? 90 : row.metrics.tbt <= 600 ? 60 : 30) : null), fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                            {row.metrics.tbt !== null ? `${row.metrics.tbt}ms` : '—'}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -2551,14 +2678,7 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
   const [expandedIncIds,   setExpandedIncIds]   = useState<Set<string>>(new Set())
   const [failedChecks,     setFailedChecks]     = useState<FailedCheckRow[]>([])
   const [incPage,          setIncPage]          = useState(0)
-  const [activeTab,        setActiveTab]        = useState<HealthTab>(() => {
-    if (typeof window === 'undefined') return 'overview'
-    try {
-      const saved = localStorage.getItem('server-health-tab') as HealthTab
-      const VALID: HealthTab[] = ['overview', 'monitors', 'checks', 'performance', 'lighthouse', 'incidents', 'anomalies']
-      return VALID.includes(saved) ? saved : 'overview'
-    } catch { return 'overview' }
-  })
+  const [activeTab,        setActiveTab]        = useState<HealthTab>('overview')
   const [timeRange,        setTimeRange]        = useState<TimeRange>('today')
   const [customFrom,       setCustomFrom]       = useState(() => {
     const d = new Date(Date.now() + 8 * 3_600_000 - 7 * 86_400_000)
@@ -2584,6 +2704,15 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
 
 
   const isMaintenance = isMYTMaintenanceNow()
+
+  // Restore saved tab after hydration (cannot use lazy initializer — causes SSR/CSR mismatch)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('server-health-tab') as HealthTab
+      const VALID: HealthTab[] = ['overview', 'monitors', 'checks', 'performance', 'lighthouse', 'incidents', 'anomalies']
+      if (VALID.includes(saved)) setActiveTab(saved)
+    } catch {}
+  }, [])
 
   useEffect(() => { onRateLimitUpdate?.(aiRateLimitReset) }, [aiRateLimitReset, onRateLimitUpdate])
 
@@ -3210,195 +3339,633 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
 
 
         {/* ── Anomalies Tab ── */}
-        {activeTab === 'anomalies' && (
-          <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
-            <div style={{ padding: '14px 20px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--tx-1)', margin: 0 }}>Detected Anomalies</h2>
-              {!loading && filteredAnomalies.length > 0 && (
-                <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 10, background: 'var(--surface-2)', color: 'var(--tx-3)' }}>{filteredAnomalies.length}</span>
-              )}
-              {aiRateLimitReset ? (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#f59e0b', padding: '2px 8px', borderRadius: 10, background: 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.3)' }}>
-                  ⚠ OpenRouter free tier exhausted — resets {new Date(aiRateLimitReset).toLocaleString('en-AU', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })} MYT
-                </span>
-              ) : aiProcessing && (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#60a5fa', padding: '2px 8px', borderRadius: 10, background: 'rgba(59,130,246,.1)', border: '1px solid rgba(59,130,246,.25)' }}>
-                  <span className="anim-spin" style={{ display: 'inline-block' }}>⟳</span>
-                  AI processing backlog…
-                </span>
-              )}
-              <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>
-                {getWindowLabel(timeRange, customFrom, customTo)} · hover ratio for details · click View Logs for CloudWatch
-              </span>
-            </div>
-            {loading ? (
-              <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {Array.from({ length: 5 }, (_, i) => <div key={i} className="skeleton" style={{ height: 12 }} />)}
-              </div>
-            ) : filteredAnomalies.length === 0 ? (
-              <div style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 13 }}>
-                No anomalies detected in {getWindowLabel(timeRange, customFrom, customTo).toLowerCase()}.
-                {anomalies.length > 0 && timeRange !== '30d' && <span> Try <button onClick={() => setTimeRange('30d')} style={{ color: '#60a5fa', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: 13 }}>last 30 days</button> to see all.</span>}
-              </div>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ background: 'var(--surface-2)' }}>
-                      {['Time (MYT)', 'Monitor', 'Type', 'Response', 'Ratio', 'HTTP', 'Error', 'Initial AI Diagnosis', 'Logs'].map(h => (
-                        <th key={h} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', whiteSpace: 'nowrap', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)' }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredAnomalies.map((a, i) => {
-                      const isLast = i === filteredAnomalies.length - 1
-                      const isExpanded = expandedAnomalyId === a.id
-                      const logData = anomalyLogs[a.id]
-                      const typeColor = a.anomaly_type === 'spike'
-                        ? (a.spike_ratio != null
-                            ? a.spike_ratio >= 6 ? C.danger : a.spike_ratio >= 3 ? '#f97316' : C.warning
-                            : C.warning)
-                        : a.anomaly_type === 'down' ? C.danger : C.warning
-                      const typeBg     = a.anomaly_type === 'down' ? C.dangerBg : 'rgba(227,179,65,.12)'
-                      const typeBorder = a.anomaly_type === 'down' ? C.dangerBorder : 'rgba(227,179,65,.3)'
-                      const hasLogs    = !!a.cloudwatch_url
-                      return (
-                        <React.Fragment key={a.id}>
-                          <tr style={{ borderBottomWidth: isExpanded || !isLast ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', background: isExpanded ? 'rgba(59,130,246,.05)' : undefined }}
-                            onMouseEnter={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)' }}
-                            onMouseLeave={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = '' }}>
-                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11, color: 'var(--tx-2)' }}>
-                              {new Date(a.checked_at).toLocaleString('en-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' })}
-                            </td>
-                            <td style={{ padding: '10px 14px', fontWeight: 600, color: 'var(--tx-1)', whiteSpace: 'nowrap' }}>{a.monitor_name}</td>
-                            <td style={{ padding: '10px 14px' }}>
-                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, textTransform: 'uppercase', background: typeBg, color: typeColor, borderWidth: 1, borderStyle: 'solid', borderColor: typeBorder }}>
-                                {a.anomaly_type === 'spike' ? '⚡ spike' : a.anomaly_type === 'down' ? '✗ down' : '⚠ degraded'}
-                              </span>
-                            </td>
-                            <td style={{ padding: '10px 14px', whiteSpace: 'nowrap', color: typeColor, fontFamily: 'monospace', fontSize: 12, fontWeight: 600 }}>
-                              {a.response_time_ms != null ? `${a.response_time_ms}ms` : '—'}
-                              {a.avg_ms != null && <span style={{ color: 'var(--tx-3)', fontWeight: 400, marginLeft: 4 }}>/ {a.avg_ms}ms avg</span>}
-                            </td>
-                            <td
-                              title={a.spike_ratio != null
-                                ? `${a.spike_ratio.toFixed(2)}× slower than baseline — this check took ${a.response_time_ms}ms vs the ${a.avg_ms}ms normal average`
-                                : undefined}
-                              style={{ padding: '10px 14px', color: a.spike_ratio != null ? typeColor : 'var(--tx-3)', fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap', cursor: a.spike_ratio != null ? 'help' : undefined }}
-                            >
-                              {a.spike_ratio != null ? `${a.spike_ratio.toFixed(1)}×` : '—'}
-                            </td>
-                            <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontSize: 12, color: a.status_code && a.status_code >= 500 ? C.danger : a.status_code && a.status_code >= 400 ? C.warning : 'var(--tx-2)' }}>
-                              {a.status_code ?? '—'}
-                            </td>
-                            <td style={{ padding: '10px 14px', maxWidth: 180 }}>
-                              {a.error_class && <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--tx-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.error_class}>{a.error_class}</div>}
-                              {a.error_message && <div style={{ fontSize: 11, color: 'var(--tx-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 2 }} title={a.error_message}>{a.error_message}</div>}
-                              {!a.error_class && !a.error_message && <span style={{ color: 'var(--tx-3)' }}>—</span>}
-                            </td>
-                            <td style={{ padding: '10px 14px', maxWidth: 240, minWidth: 160 }}>
-                              {a.ai_analysis
-                                ? <span style={{ fontSize: 12, color: 'var(--tx-2)', lineHeight: 1.45 }}>{a.ai_analysis}</span>
-                                : aiRateLimitReset
-                                  ? <span style={{ fontSize: 11, color: '#f59e0b', fontStyle: 'italic' }}>Rate limited</span>
-                                  : aiProcessing
-                                    ? <span style={{ fontSize: 11, color: '#60a5fa', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                                        <span className="anim-spin" style={{ display: 'inline-block', fontSize: 11 }}>⟳</span>
-                                        Analyzing…
-                                      </span>
-                                    : <span style={{ fontSize: 11, color: 'var(--tx-3)', fontStyle: 'italic' }}>Queued</span>}
-                            </td>
-                            <td style={{ padding: '10px 14px' }}>
-                              {hasLogs ? (
-                                <button
-                                  onClick={() => {
-                                    const wasExpanded = expandedAnomalyId === a.id
-                                    setExpandedAnomalyId(wasExpanded ? null : a.id)
-                                    if (!wasExpanded) fetchAnomalyLogs(a)
-                                  }}
-                                  style={{
-                                    fontSize: 11, padding: '3px 10px', borderRadius: 'var(--r-sm)', whiteSpace: 'nowrap', cursor: 'pointer',
-                                    background: isExpanded ? 'rgba(59,130,246,.15)' : 'var(--surface-2)',
-                                    color: isExpanded ? '#60a5fa' : 'var(--tx-2)',
-                                    borderWidth: 1, borderStyle: 'solid',
-                                    borderColor: isExpanded ? 'rgba(59,130,246,.3)' : 'var(--border)',
-                                  }}
-                                >
-                                  {isExpanded ? 'Hide' : 'View Logs'}
-                                </button>
-                              ) : (
-                                <span style={{ color: 'var(--tx-3)', fontSize: 11 }}>—</span>
-                              )}
-                            </td>
-                          </tr>
+        {activeTab === 'anomalies' && (() => {
+          // Determine status for each anomaly group relative to current monitor state
+          const monitorStatusMap = new Map(monitors.map(m => [m.id, m.status]))
+          const now = Date.now()
+          const twoHoursMs = 2 * 3_600_000
 
-                          {/* Inline log viewer */}
-                          {isExpanded && (
-                            <tr style={{ borderBottomWidth: isLast ? 0 : 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', background: 'var(--surface-2)' }}>
-                              <td colSpan={9} style={{ padding: '16px 20px 20px' }}>
-                                {!logData || logData.loading ? (
-                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                    <div style={{ fontSize: 11, color: 'var(--tx-3)', marginBottom: 4 }}>Fetching CloudWatch logs and running AI analysis…</div>
-                                    {Array.from({ length: 5 }, (_, si) => (
-                                      <div key={si} className="skeleton" style={{ height: 10, maxWidth: `${85 - si * 10}%` }} />
-                                    ))}
+          const withStatus = filteredAnomalies.map(a => {
+            const monStatus = monitorStatusMap.get(a.monitor_id)
+            const lastSeenMs = new Date(a.last_seen).getTime()
+            const isMonitorDown = monStatus === 'down' || monStatus === 'degraded'
+            const quieted = (now - lastSeenMs) > twoHoursMs
+
+            let status: 'active' | 'recurring' | 'quiet'
+            if (isMonitorDown || (!quieted && a.occurrence_count > 1)) status = 'active'
+            else if (!quieted) status = 'recurring'
+            else status = 'quiet'
+
+            return { ...a, _status: status }
+          })
+
+          // Sort: active first, then recurring, then quiet; within each group by occurrence_count desc
+          const sorted = [...withStatus].sort((a, b) => {
+            const order = { active: 0, recurring: 1, quiet: 2 }
+            if (order[a._status] !== order[b._status]) return order[a._status] - order[b._status]
+            return b.occurrence_count - a.occurrence_count
+          })
+
+          // Cross-monitor grouping: collapse rows sharing the same error_fingerprint into one card
+          const groupMap = new Map<string, typeof sorted>()
+          for (const a of sorted) {
+            const arr = groupMap.get(a.error_fingerprint) ?? []
+            arr.push(a)
+            groupMap.set(a.error_fingerprint, arr)
+          }
+          const groups = Array.from(groupMap.values()).map(rows => {
+            const groupStatus: 'active' | 'recurring' | 'quiet' =
+              rows.some(r => r._status === 'active') ? 'active'
+              : rows.some(r => r._status === 'recurring') ? 'recurring' : 'quiet'
+            const rep = rows.find(r => r.ai_analysis) ?? rows[0]
+            return {
+              fingerprint:      rep.error_fingerprint,
+              anomaly_type:     rep.anomaly_type,
+              error_class:      rep.error_class,
+              error_message:    rep.error_message,
+              status_code:      rep.status_code,
+              ai_analysis:      rep.ai_analysis,
+              cloudwatch_url:   rep.cloudwatch_url,
+              rep,
+              totalOccurrences: rows.reduce((s, r) => s + r.occurrence_count, 0),
+              firstSeen:        rows.map(r => r.first_seen).sort()[0],
+              lastSeen:         rows.map(r => r.last_seen).sort().reverse()[0],
+              _status:          groupStatus,
+              monitors:         rows.map(r => ({
+                id:               r.id,
+                monitor_id:       r.monitor_id,
+                monitor_name:     r.monitor_name,
+                monitor_target:   r.monitor_target,
+                occurrence_count: r.occurrence_count,
+                _status:          r._status,
+                spike_ratio:      r.spike_ratio,
+                response_time_ms: r.response_time_ms,
+                avg_ms:           r.avg_ms,
+                first_seen:       r.first_seen,
+                last_seen:        r.last_seen,
+                checked_at:       r.checked_at,
+                status_code:      r.status_code,
+                cloudwatch_url:   r.cloudwatch_url,
+              })),
+            }
+          }).sort((a, b) => {
+            const order = { active: 0, recurring: 1, quiet: 2 }
+            if (order[a._status] !== order[b._status]) return order[a._status] - order[b._status]
+            return b.totalOccurrences - a.totalOccurrences
+          })
+
+          const activeCount    = groups.filter(g => g._status === 'active').length
+          const recurringCount = groups.filter(g => g._status === 'recurring').length
+
+          return (
+            <div style={{ background: 'var(--surface-1)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+              {/* Header */}
+              <div style={{ padding: '14px 20px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--border)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--tx-1)', margin: 0 }}>Anomaly Groups</h2>
+                {!loading && (
+                  <div style={{ display: 'flex', gap: 5 }}>
+                    {activeCount > 0 && (
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 10, background: C.dangerBg, color: C.danger, border: `1px solid ${C.dangerBorder}` }}>
+                        {activeCount} active
+                      </span>
+                    )}
+                    {recurringCount > 0 && (
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 10, background: C.warningBg, color: C.warning, border: `1px solid ${C.warningBorder}` }}>
+                        {recurringCount} recurring
+                      </span>
+                    )}
+                  </div>
+                )}
+                {aiRateLimitReset ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#f59e0b', padding: '2px 8px', borderRadius: 10, background: 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.3)' }}>
+                    ⚠ OpenRouter rate limit — resets {new Date(aiRateLimitReset).toLocaleString('en-AU', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })} MYT
+                  </span>
+                ) : aiProcessing && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#60a5fa', padding: '2px 8px', borderRadius: 10, background: 'rgba(59,130,246,.1)', border: '1px solid rgba(59,130,246,.25)' }}>
+                    <span className="anim-spin" style={{ display: 'inline-block' }}>⟳</span> AI analyzing…
+                  </span>
+                )}
+                <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 'auto' }}>
+                  Each row = one unique error pattern · recurrences collapsed · {getWindowLabel(timeRange, customFrom, customTo)}
+                </span>
+              </div>
+
+              {loading ? (
+                <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {Array.from({ length: 4 }, (_, i) => <div key={i} className="skeleton" style={{ height: 70 }} />)}
+                </div>
+              ) : sorted.length === 0 ? (
+                <div style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--tx-3)', fontSize: 13 }}>
+                  No anomalies detected in {getWindowLabel(timeRange, customFrom, customTo).toLowerCase()}.
+                  {anomalies.length > 0 && timeRange !== '30d' && (
+                    <span> Try <button onClick={() => setTimeRange('30d')} style={{ color: '#60a5fa', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: 13 }}>last 30 days</button>.</span>
+                  )}
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  {groups.map((g, i) => {
+                    const isExpanded = expandedAnomalyId === g.fingerprint
+                    const logData    = anomalyLogs[g.rep.id]
+                    const isLast     = i === groups.length - 1
+
+                    // Colours by type
+                    const maxRatio   = Math.max(...g.monitors.map(m => m.spike_ratio ?? 0))
+                    const typeColor  = g.anomaly_type === 'down' ? C.danger
+                      : maxRatio >= 6 ? C.danger
+                      : maxRatio >= 3 ? '#f97316'
+                      : C.warning
+                    const typeBg     = g.anomaly_type === 'down' ? C.dangerBg : 'rgba(227,179,65,.12)'
+                    const typeBorder = g.anomaly_type === 'down' ? C.dangerBorder : 'rgba(227,179,65,.3)'
+
+                    // Status pill
+                    const statusColor  = g._status === 'active' ? C.danger : g._status === 'recurring' ? C.warning : C.muted
+                    const statusBg     = g._status === 'active' ? C.dangerBg : g._status === 'recurring' ? C.warningBg : C.mutedBg
+                    const statusBorder = g._status === 'active' ? C.dangerBorder : g._status === 'recurring' ? C.warningBorder : C.mutedBorder
+                    const statusLabel  = g._status === 'active' ? '● Active' : g._status === 'recurring' ? '↺ Recurring' : '○ Quiet'
+
+                    const fmtMYT = (iso: string) => new Date(iso).toLocaleString('en-MY', {
+                      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur',
+                    })
+                    const isMultiDay = g.firstSeen.slice(0, 10) !== g.lastSeen.slice(0, 10)
+
+                    // Primary title: error class (the WHAT), not the monitor name
+                    const errorTitle = g.error_class ?? (g.anomaly_type === 'down' ? 'Service down' : 'Performance spike')
+
+                    return (
+                      <div key={g.fingerprint} style={{
+                        borderBottomWidth: isLast && !isExpanded ? 0 : 1,
+                        borderBottomStyle: 'solid', borderBottomColor: 'var(--border)',
+                      }}>
+                        {/* Group row — click anywhere to expand detail */}
+                        <div
+                          onClick={() => setExpandedAnomalyId(isExpanded ? null : g.fingerprint)}
+                          style={{
+                            display: 'flex', alignItems: 'flex-start', gap: 14, padding: '14px 20px',
+                            background: isExpanded ? 'rgba(59,130,246,.04)' : undefined,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {/* Left: type badge + status */}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0, paddingTop: 2 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, textTransform: 'uppercase', background: typeBg, color: typeColor, borderWidth: 1, borderStyle: 'solid', borderColor: typeBorder, whiteSpace: 'nowrap' }}>
+                              {g.anomaly_type === 'spike' ? '⚡ spike' : '✗ down'}
+                            </span>
+                            <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: statusBg, color: statusColor, borderWidth: 1, borderStyle: 'solid', borderColor: statusBorder, whiteSpace: 'nowrap' }}>
+                              {statusLabel}
+                            </span>
+                          </div>
+
+                          {/* Middle: error title + plain-English summary + monitors + AI */}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+
+                            {/* Row 1: Error title + HTTP status + detection count */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 3 }}>
+                              <span style={{
+                                fontSize: 14, fontWeight: 700,
+                                fontFamily: g.error_class ? 'monospace' : 'inherit',
+                                color: typeColor,
+                                background: g.error_class ? typeBg : 'transparent',
+                                padding: g.error_class ? '1px 6px' : 0,
+                                borderRadius: 4,
+                              }}>
+                                {errorTitle}
+                              </span>
+                              {g.status_code != null && (
+                                <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, padding: '1px 5px', borderRadius: 4, background: g.status_code >= 500 ? C.dangerBg : C.warningBg, color: g.status_code >= 500 ? C.danger : C.warning }}>
+                                  HTTP {g.status_code}
+                                </span>
+                              )}
+                              <span
+                                title="How many times our health checker detected this problem across all monitors"
+                                style={{ fontSize: 11, fontWeight: 700, padding: '1px 8px', borderRadius: 10, background: typeColor + '18', color: typeColor, border: `1px solid ${typeColor}40`, whiteSpace: 'nowrap', cursor: 'help' }}
+                              >
+                                {g.totalOccurrences} detection{g.totalOccurrences !== 1 ? 's' : ''}
+                              </span>
+                            </div>
+
+                            {/* Row 2: Plain-English summary */}
+                            <div style={{ fontSize: 12, color: 'var(--tx-2)', marginBottom: 7, lineHeight: 1.4 }}>
+                              {g.anomaly_type === 'down'
+                                ? 'Connection failed — the service did not respond to health checks'
+                                : (() => {
+                                    const bestM = g.monitors.reduce((best, m) =>
+                                      (m.spike_ratio ?? 0) > (best.spike_ratio ?? 0) ? m : best, g.monitors[0])
+                                    const ratio = bestM.spike_ratio
+                                    const actual = bestM.response_time_ms
+                                    const avg = bestM.avg_ms
+                                    if (ratio != null && actual != null && avg != null)
+                                      return `Responded in ${actual.toLocaleString()}ms — ${ratio.toFixed(1)}× slower than the usual ${avg.toLocaleString()}ms baseline`
+                                    if (actual != null)
+                                      return `Responded in ${actual.toLocaleString()}ms — significantly above normal response times`
+                                    return 'Response time was significantly above the normal baseline'
+                                  })()
+                              }
+                              {g.error_message && (
+                                <span style={{ color: 'var(--tx-3)' }}> · {g.error_message.slice(0, 120)}{g.error_message.length > 120 ? '…' : ''}</span>
+                              )}
+                            </div>
+
+                            {/* Row 3: Spike severity bar (spike only) */}
+                            {g.anomaly_type === 'spike' && (() => {
+                              const bestRatio = Math.max(...g.monitors.map(m => m.spike_ratio ?? 0))
+                              if (bestRatio <= 0) return null
+                              const cappedPct = Math.min(100, (bestRatio / 10) * 100)
+                              const barColor = bestRatio >= 6 ? C.danger : bestRatio >= 3 ? '#f97316' : C.warning
+                              return (
+                                <div style={{ marginBottom: 8 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <div style={{ flex: 1, height: 5, background: 'var(--surface-3)', borderRadius: 99, overflow: 'hidden' }}>
+                                      <div style={{ width: `${cappedPct}%`, height: '100%', background: barColor, borderRadius: 99, transition: 'width .4s ease' }} />
+                                    </div>
+                                    <span style={{ fontSize: 10, fontWeight: 700, color: barColor, whiteSpace: 'nowrap', minWidth: 60 }}
+                                      title="Spike ratio: how many times slower than the rolling 30-day average. 1× = normal, 3× = 3 times slower than usual.">
+                                      {bestRatio.toFixed(1)}× slower ⓘ
+                                    </span>
                                   </div>
-                                ) : logData.error ? (
-                                  <div style={{ color: C.danger, fontSize: 12 }}>⚠ {logData.error}</div>
-                                ) : (
-                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                                    {/* AI diagnosis from actual logs */}
-                                    {logData.analysis ? (
-                                      <div style={{ background: 'rgba(59,130,246,.08)', borderWidth: 1, borderStyle: 'solid', borderColor: 'rgba(59,130,246,.2)', borderRadius: 'var(--r-md)', padding: '10px 14px' }}>
-                                        <div style={{ fontSize: 10, fontWeight: 700, color: '#60a5fa', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>AI Diagnosis (from CloudWatch logs)</div>
-                                        <p style={{ margin: 0, fontSize: 13, color: 'var(--tx-1)', lineHeight: 1.6 }}>{logData.analysis}</p>
-                                      </div>
-                                    ) : (
-                                      <div style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>
-                                        {logData.events.length === 0 ? 'No log events found — AI analysis skipped.' : 'AI analysis unavailable (check OPENROUTER_API_KEY).'}
-                                      </div>
-                                    )}
-                                    {/* Log lines */}
-                                    <div>
-                                      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
-                                        CloudWatch Logs · {logData.events.length} event{logData.events.length !== 1 ? 's' : ''} · ±2 min window around {new Date(a.checked_at).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' })} MYT
-                                      </div>
-                                      {logData.events.length === 0 ? (
-                                        <div style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic' }}>No log events found in this ±2 min window. The log group may not have captured this request.</div>
-                                      ) : (
-                                        <pre style={{ margin: 0, padding: '12px 14px', background: '#0d1117', borderRadius: 'var(--r-md)', fontSize: 11, fontFamily: 'monospace', overflowX: 'auto', maxHeight: 300, overflowY: 'auto', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                                          {logData.events.map((ev, ei) => {
-                                            const msg = ev.message ?? ''
-                                            const isErr  = /error|fatal|exception/i.test(msg)
-                                            const isWarn = /warn/i.test(msg)
-                                            const evTs   = ev.timestamp
-                                              ? new Date(ev.timestamp).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', second: '2-digit' })
-                                              : ''
+                                </div>
+                              )
+                            })()}
+
+                            {/* Row 4: Affected monitors */}
+                            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 6 }}>
+                              {g.monitors.map(m => {
+                                const mBg  = m._status === 'active' ? C.dangerBg : m._status === 'recurring' ? C.warningBg : 'var(--surface-3)'
+                                const mCol = m._status === 'active' ? C.danger   : m._status === 'recurring' ? C.warning   : 'var(--tx-2)'
+                                const mBdr = m._status === 'active' ? C.dangerBorder : m._status === 'recurring' ? C.warningBorder : 'var(--border)'
+                                return (
+                                  <span key={m.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 8, whiteSpace: 'nowrap', background: mBg, color: mCol, border: `1px solid ${mBdr}` }}
+                                    title={m.spike_ratio != null ? `${m.occurrence_count} detection${m.occurrence_count !== 1 ? 's' : ''} · responded ${m.spike_ratio.toFixed(1)}× slower than usual (${m.response_time_ms}ms vs ${m.avg_ms}ms baseline)` : `${m.occurrence_count} detection${m.occurrence_count !== 1 ? 's' : ''}`}>
+                                    {m.monitor_name}
+                                    {m.spike_ratio != null
+                                      ? <span style={{ marginLeft: 5, fontSize: 10, opacity: .75 }}>{m.spike_ratio.toFixed(1)}× slower</span>
+                                      : m.occurrence_count > 1 && <span style={{ marginLeft: 4, fontWeight: 700 }}>{m.occurrence_count}×</span>}
+                                  </span>
+                                )
+                              })}
+                            </div>
+
+                            {/* Row 5: AI diagnosis or fallback */}
+                            {g.ai_analysis ? (
+                              <div style={{ marginTop: 4, fontSize: 12, color: 'var(--tx-1)', lineHeight: 1.55, padding: '7px 10px', background: 'rgba(59,130,246,.08)', borderRadius: 'var(--r-sm)', borderLeft: '3px solid rgba(59,130,246,.5)', display: 'flex', gap: 7, alignItems: 'flex-start' }}>
+                                <span style={{ fontSize: 13, flexShrink: 0 }}>🤖</span>
+                                <span>{g.ai_analysis}</span>
+                              </div>
+                            ) : (
+                              <div style={{ marginTop: 4, fontSize: 11, color: 'var(--tx-3)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                                {aiRateLimitReset
+                                  ? <span style={{ color: '#f59e0b' }}>⚠ AI rate-limited — will retry when quota resets</span>
+                                  : aiProcessing
+                                    ? <span>⟳ AI analyzing…</span>
+                                    : <span>AI diagnosis pending</span>}
+                                {g.cloudwatch_url && !g.ai_analysis && (
+                                  <button
+                                    onClick={e => { e.stopPropagation(); setExpandedAnomalyId(g.fingerprint); fetchAnomalyLogs(g.rep) }}
+                                    style={{ fontSize: 10, padding: '1px 8px', borderRadius: 4, cursor: 'pointer', background: 'var(--surface-3)', color: '#60a5fa', border: '1px solid rgba(96,165,250,.3)', fontFamily: 'inherit' }}
+                                  >
+                                    Load logs →
+                                  </button>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Row 6: Timestamps (compact) */}
+                            <div style={{ fontSize: 10, color: 'var(--tx-3)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6 }}>
+                              <span>First: <span style={{ color: 'var(--tx-2)' }}>{fmtMYT(g.firstSeen)} MYT</span></span>
+                              {g.totalOccurrences > 1 && (
+                                <span>Last: <span style={{ color: g._status === 'active' ? C.danger : 'var(--tx-2)' }}>{fmtMYT(g.lastSeen)} MYT</span></span>
+                              )}
+                              {isMultiDay && g.totalOccurrences > 1 && (
+                                <span style={{ color: C.warning }}>↻ spanning {Math.ceil((new Date(g.lastSeen).getTime() - new Date(g.firstSeen).getTime()) / 86_400_000)}d</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Right: expand chevron */}
+                          <div style={{ flexShrink: 0, paddingTop: 4 }}>
+                            <span style={{ fontSize: 16, color: 'var(--tx-3)', display: 'inline-block', transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform .15s' }}>▾</span>
+                          </div>
+                        </div>
+
+                        {/* Expanded detail panel */}
+                        {isExpanded && (() => {
+                          const durMs = new Date(g.lastSeen).getTime() - new Date(g.firstSeen).getTime()
+                          const dur = durMs < 60_000 ? 'under a minute'
+                            : durMs < 3_600_000 ? `${Math.round(durMs / 60_000)} min`
+                            : durMs < 86_400_000 ? `${(durMs / 3_600_000).toFixed(1)}h`
+                            : `${Math.ceil(durMs / 86_400_000)} days`
+                          const severity = g.anomaly_type === 'down' ? { label: 'Critical — service unreachable', color: C.danger }
+                            : maxRatio >= 6 ? { label: `Critical — ${maxRatio.toFixed(1)}× normal response time`, color: C.danger }
+                            : maxRatio >= 3 ? { label: `High — ${maxRatio.toFixed(1)}× normal response time`, color: '#f97316' }
+                            : { label: `Medium — ${maxRatio.toFixed(1)}× normal response time`, color: C.warning }
+                          const sectionHead = (label: string) => (
+                            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.09em', marginBottom: 10, paddingBottom: 5, borderBottom: '1px solid var(--border)' }}>
+                              {label}
+                            </div>
+                          )
+                          // Per-monitor log state (keyed by row id)
+                          const perMonitorLogs = g.monitors.reduce((acc, m) => {
+                            acc[m.id] = anomalyLogs[m.id] ?? null
+                            return acc
+                          }, {} as Record<string, typeof anomalyLogs[string] | null>)
+
+                          // Derive a full AnomalyRow-compatible object for each monitor for fetchAnomalyLogs
+                          const monitorAsRow = (m: typeof g.monitors[0]): AnomalyRow => ({
+                            ...g.rep,
+                            id:               m.id,
+                            monitor_id:       m.monitor_id,
+                            monitor_name:     m.monitor_name,
+                            monitor_target:   m.monitor_target,
+                            occurrence_count: m.occurrence_count,
+                            spike_ratio:      m.spike_ratio,
+                            response_time_ms: m.response_time_ms,
+                            avg_ms:           m.avg_ms,
+                            first_seen:       m.first_seen,
+                            last_seen:        m.last_seen,
+                            checked_at:       m.checked_at,
+                            status_code:      m.status_code,
+                            cloudwatch_url:   m.cloudwatch_url,
+                          })
+
+                          // Active log panel — which monitor's logs are expanded
+                          const activeLogMonitorId = Object.keys(perMonitorLogs).find(id => perMonitorLogs[id] != null)
+
+                          return (
+                            <div style={{ borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--border)', background: 'var(--surface-2)' }}>
+                              <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 22 }}>
+
+                                {/* ── 1. AI DIAGNOSIS (first — most useful) ── */}
+                                <div>
+                                  {sectionHead('🤖 AI Diagnosis')}
+                                  {g.ai_analysis ? (
+                                    <div style={{ fontSize: 13, color: 'var(--tx-1)', lineHeight: 1.75, padding: '12px 16px', background: 'rgba(59,130,246,.08)', borderRadius: 'var(--r-md)', borderLeft: '3px solid rgba(59,130,246,.5)' }}>
+                                      {g.ai_analysis}
+                                    </div>
+                                  ) : (
+                                    <div style={{ padding: '12px 16px', background: 'var(--surface-3)', borderRadius: 'var(--r-md)', border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                      {aiRateLimitReset
+                                        ? <span style={{ fontSize: 12, color: '#f59e0b' }}>⚠ AI quota reached — will retry when it resets</span>
+                                        : aiProcessing
+                                          ? <span style={{ fontSize: 12, color: '#60a5fa' }}>⟳ AI is analyzing this anomaly — check back in a moment</span>
+                                          : <span style={{ fontSize: 12, color: 'var(--tx-3)' }}>No AI diagnosis yet. {g.anomaly_type === 'spike' && !g.error_class ? 'This is a pure performance spike with no error signal — load CloudWatch logs below for context.' : 'Analysis is queued.'}</span>}
+                                      {g.cloudwatch_url && (
+                                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                          {g.monitors.filter(m => m.cloudwatch_url).map(m => {
+                                            const ld = perMonitorLogs[m.id]
                                             return (
-                                              <div key={ei} style={{ color: isErr ? C.danger : isWarn ? C.warning : 'var(--tx-2)', marginBottom: 2 }}>
-                                                {evTs && <span style={{ color: 'var(--tx-3)', marginRight: 10, fontSize: 10, flexShrink: 0 }}>{evTs}</span>}
-                                                {msg}
-                                              </div>
+                                              <button key={m.id}
+                                                onClick={e => { e.stopPropagation(); fetchAnomalyLogs(monitorAsRow(m)) }}
+                                                disabled={ld?.loading}
+                                                style={{ fontSize: 11, padding: '4px 12px', borderRadius: 'var(--r-sm)', cursor: 'pointer', background: ld ? 'rgba(59,130,246,.12)' : 'var(--surface-2)', color: ld ? '#60a5fa' : 'var(--tx-2)', border: `1px solid ${ld ? 'rgba(59,130,246,.35)' : 'var(--border)'}`, fontFamily: 'inherit' }}
+                                              >
+                                                {ld?.loading ? '⟳ loading…' : ld?.error ? '⚠ retry' : ld ? '✓ logs loaded' : `Load logs — ${m.monitor_name}`}
+                                              </button>
                                             )
                                           })}
-                                        </pre>
+                                        </div>
                                       )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* ── 2. WHAT HAPPENED ── */}
+                                <div>
+                                  {sectionHead('What happened')}
+                                  <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                                    <div>
+                                      <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 2 }}>Type</div>
+                                      <div style={{ fontSize: 13, color: 'var(--tx-1)' }}>{g.anomaly_type === 'down' ? '✗ Service unreachable — connection failed' : '⚡ Response time spike'}</div>
+                                    </div>
+                                    <div>
+                                      <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 2 }}>Severity</div>
+                                      <div style={{ fontSize: 13, fontWeight: 600, color: severity.color }}>{severity.label}</div>
+                                    </div>
+                                    {g.status_code != null && (
+                                      <div>
+                                        <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 2 }}>HTTP status</div>
+                                        <div style={{ fontSize: 13, fontFamily: 'monospace', color: g.status_code >= 500 ? C.danger : C.warning }}>HTTP {g.status_code}</div>
+                                      </div>
+                                    )}
+                                    {g.error_class && (
+                                      <div>
+                                        <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 2 }}>Error class</div>
+                                        <code style={{ fontSize: 12, fontFamily: 'monospace', color: typeColor, background: typeBg, padding: '2px 8px', borderRadius: 4 }}>{g.error_class}</code>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {g.error_message && (
+                                    <div style={{ marginTop: 10 }}>
+                                      <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 4 }}>Error message</div>
+                                      <div style={{ fontSize: 12, color: 'var(--tx-2)', fontFamily: 'monospace', background: 'var(--surface-3)', padding: '8px 12px', borderRadius: 'var(--r-sm)', wordBreak: 'break-all' }}>{g.error_message}</div>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* ── 3. RESPONSE TIME VISUAL (spike only) ── */}
+                                {g.anomaly_type === 'spike' && g.monitors.some(m => m.response_time_ms != null) && (
+                                  <div>
+                                    {sectionHead('Response time — actual vs baseline')}
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                      {g.monitors.filter(m => m.response_time_ms != null).sort((a, b) => (b.spike_ratio ?? 0) - (a.spike_ratio ?? 0)).map(m => {
+                                        const actual = m.response_time_ms!
+                                        const avg    = m.avg_ms ?? actual
+                                        const ratio  = m.spike_ratio ?? (actual / avg)
+                                        const barColor = ratio >= 6 ? C.danger : ratio >= 3 ? '#f97316' : C.warning
+                                        // Normalize: baseline = 40% of bar, actual = proportional to ratio
+                                        const baselinePct = 30
+                                        const actualPct   = Math.min(100, baselinePct * ratio)
+                                        return (
+                                          <div key={m.id}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                                              <span style={{ fontSize: 11, color: 'var(--tx-2)', fontWeight: 500 }}>{m.monitor_name}</span>
+                                              <span style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--tx-3)' }}>{actual.toLocaleString()}ms <span style={{ color: 'var(--tx-4, var(--tx-3))' }}>vs</span> {avg.toLocaleString()}ms baseline</span>
+                                            </div>
+                                            <div style={{ position: 'relative', height: 22, background: 'var(--surface-3)', borderRadius: 6, overflow: 'hidden' }}>
+                                              {/* Baseline bar */}
+                                              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${baselinePct}%`, background: '#3fb95044', borderRight: '2px dashed #3fb95099' }} />
+                                              {/* Actual bar */}
+                                              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${actualPct}%`, background: barColor + '66', borderRight: `2px solid ${barColor}`, transition: 'width .5s ease' }} />
+                                              {/* Labels */}
+                                              <div style={{ position: 'absolute', left: 6, top: 0, height: '100%', display: 'flex', alignItems: 'center' }}>
+                                                <span style={{ fontSize: 9, color: '#3fb950', fontWeight: 700, whiteSpace: 'nowrap' }}>baseline</span>
+                                              </div>
+                                              <div style={{ position: 'absolute', right: 6, top: 0, height: '100%', display: 'flex', alignItems: 'center' }}>
+                                                <span style={{ fontSize: 10, color: barColor, fontWeight: 700 }}>{ratio.toFixed(1)}× slower</span>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+                                    <div style={{ marginTop: 8, fontSize: 10, color: 'var(--tx-3)' }}>
+                                      <span style={{ color: '#3fb950', fontWeight: 600 }}>Green dashed line</span> = 30-day rolling average (baseline). <span style={{ color: C.warning, fontWeight: 600 }}>Coloured bar</span> = actual response time during the anomaly. Longer bar = slower response.
                                     </div>
                                   </div>
                                 )}
-                              </td>
-                            </tr>
-                          )}
-                        </React.Fragment>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
+
+                                {/* ── 4. WHEN ── */}
+                                <div>
+                                  {sectionHead('When')}
+                                  <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
+                                    <div>
+                                      <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 2 }}>First detected</div>
+                                      <div style={{ fontSize: 13, color: 'var(--tx-1)' }}>{fmtMYT(g.firstSeen)} MYT</div>
+                                    </div>
+                                    {g.totalOccurrences > 1 && (
+                                      <div>
+                                        <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 2 }}>Last detected</div>
+                                        <div style={{ fontSize: 13, color: g._status === 'active' ? C.danger : 'var(--tx-1)' }}>{fmtMYT(g.lastSeen)} MYT{g._status === 'active' && <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 600, color: C.danger }}>● still active</span>}</div>
+                                      </div>
+                                    )}
+                                    <div>
+                                      <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 2 }}>Duration</div>
+                                      <div style={{ fontSize: 13, color: 'var(--tx-1)' }}>{dur}</div>
+                                    </div>
+                                    <div>
+                                      <div style={{ fontSize: 10, color: 'var(--tx-3)', marginBottom: 2 }}>Total detections</div>
+                                      <div style={{ fontSize: 13, fontWeight: 700, color: typeColor }}>{g.totalOccurrences} across {g.monitors.length} monitor{g.monitors.length !== 1 ? 's' : ''}</div>
+                                      <div style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 2 }}>Each detection = one failed health check</div>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* ── 5. WHERE — per-monitor table with log buttons ── */}
+                                <div>
+                                  {sectionHead(`Where — ${g.monitors.length} affected monitor${g.monitors.length !== 1 ? 's' : ''}`)}
+                                  <div style={{ overflowX: 'auto' }}>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                      <thead>
+                                        <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                                          {[
+                                            { h: 'Monitor',            tip: null },
+                                            { h: 'Detections',         tip: 'How many times our health checker detected this problem for this monitor' },
+                                            { h: 'Actual response',    tip: 'The response time recorded when the anomaly was detected' },
+                                            { h: 'Baseline (30d avg)', tip: 'The average response time over the last 30 days — used to detect spikes' },
+                                            { h: 'Spike ratio',        tip: 'How many times slower the actual response was vs the baseline. 3× means it took 3 times longer than usual.' },
+                                            { h: 'Last seen',          tip: null },
+                                            { h: 'Logs',               tip: 'Load CloudWatch logs from ±2 minutes around the anomaly time' },
+                                          ].map(({ h, tip }) => (
+                                            <th key={h} title={tip ?? undefined} style={{ textAlign: h === 'Monitor' ? 'left' : 'right', padding: '3px 10px 7px', color: 'var(--tx-3)', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap', cursor: tip ? 'help' : 'default' }}>
+                                              {h}{tip && ' ⓘ'}
+                                            </th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {g.monitors.slice().sort((a, b) => b.occurrence_count - a.occurrence_count).map((m, mi) => {
+                                          const mColor  = m._status === 'active' ? C.danger : m._status === 'recurring' ? C.warning : 'var(--tx-2)'
+                                          const spikeC  = (m.spike_ratio ?? 0) >= 6 ? C.danger : (m.spike_ratio ?? 0) >= 3 ? '#f97316' : C.warning
+                                          const mLogData = perMonitorLogs[m.id]
+                                          return (
+                                            <tr key={m.id} style={{ borderBottom: mi < g.monitors.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                                              <td style={{ padding: '8px 10px 8px 0', color: 'var(--tx-1)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+                                                <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: mColor, marginRight: 7, verticalAlign: 'middle' }} />
+                                                {m.monitor_name}
+                                              </td>
+                                              <td style={{ padding: '8px 10px', textAlign: 'right', color: typeColor, fontWeight: 700 }}>{m.occurrence_count}</td>
+                                              <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'monospace', fontSize: 11, whiteSpace: 'nowrap', color: 'var(--tx-1)', fontWeight: 600 }}>
+                                                {m.response_time_ms != null ? `${m.response_time_ms.toLocaleString()}ms` : '—'}
+                                              </td>
+                                              <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'monospace', fontSize: 11, whiteSpace: 'nowrap', color: 'var(--tx-3)' }}>
+                                                {m.avg_ms != null ? `${m.avg_ms.toLocaleString()}ms` : '—'}
+                                              </td>
+                                              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, whiteSpace: 'nowrap', color: m.spike_ratio != null ? spikeC : 'var(--tx-3)' }}>
+                                                {m.spike_ratio != null ? `${m.spike_ratio.toFixed(1)}× slower` : '—'}
+                                              </td>
+                                              <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--tx-2)', fontSize: 11, whiteSpace: 'nowrap' }}>{fmtMYT(m.last_seen)} MYT</td>
+                                              <td style={{ padding: '8px 0 8px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                {m.cloudwatch_url ? (
+                                                  <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
+                                                    <button
+                                                      onClick={e => { e.stopPropagation(); fetchAnomalyLogs(monitorAsRow(m)) }}
+                                                      disabled={mLogData?.loading}
+                                                      style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, cursor: 'pointer', background: mLogData ? 'rgba(59,130,246,.12)' : 'var(--surface-3)', color: mLogData ? '#60a5fa' : 'var(--tx-2)', border: `1px solid ${mLogData ? 'rgba(59,130,246,.35)' : 'var(--border)'}`, fontFamily: 'inherit' }}
+                                                    >
+                                                      {mLogData?.loading ? '⟳' : mLogData?.error ? '⚠ retry' : mLogData ? '✓ loaded' : 'Load logs'}
+                                                    </button>
+                                                    <a href={m.cloudwatch_url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: 10, color: 'var(--tx-3)', textDecoration: 'none' }} title="Open in CloudWatch console">↗</a>
+                                                  </div>
+                                                ) : <span style={{ color: 'var(--tx-4, var(--tx-3))', fontSize: 10 }}>no URL</span>}
+                                              </td>
+                                            </tr>
+                                          )
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </div>
+
+                                  {/* Per-monitor log viewer */}
+                                  {g.monitors.filter(m => perMonitorLogs[m.id]).map(m => {
+                                    const ld = perMonitorLogs[m.id]!
+                                    return (
+                                      <div key={m.id} style={{ marginTop: 14 }}>
+                                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--tx-2)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                          <span>Logs: {m.monitor_name}</span>
+                                          <span style={{ fontSize: 10, color: 'var(--tx-3)' }}>±2 min around {fmtMYT(m.last_seen)} MYT</span>
+                                        </div>
+                                        {ld.loading ? (
+                                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                            {Array.from({ length: 3 }, (_, i) => <div key={i} className="skeleton" style={{ height: 10, maxWidth: `${80 - i * 15}%` }} />)}
+                                          </div>
+                                        ) : ld.error ? (
+                                          <div style={{ color: C.danger, fontSize: 12 }}>⚠ {ld.error}</div>
+                                        ) : (
+                                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                            {ld.analysis && (
+                                              <div style={{ background: 'rgba(59,130,246,.08)', border: '1px solid rgba(59,130,246,.2)', borderRadius: 'var(--r-md)', padding: '10px 14px' }}>
+                                                <div style={{ fontSize: 10, fontWeight: 700, color: '#60a5fa', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>AI Diagnosis (from logs)</div>
+                                                <p style={{ margin: 0, fontSize: 13, color: 'var(--tx-1)', lineHeight: 1.6 }}>{ld.analysis}</p>
+                                              </div>
+                                            )}
+                                            {ld.events.length === 0 ? (
+                                              <div style={{ fontSize: 12, color: 'var(--tx-3)', fontStyle: 'italic', padding: '8px 0' }}>No log events in this time window.</div>
+                                            ) : (
+                                              <pre style={{ margin: 0, padding: '12px 14px', background: '#0d1117', borderRadius: 'var(--r-md)', fontSize: 11, fontFamily: 'monospace', overflowX: 'auto', maxHeight: 280, overflowY: 'auto', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                                {ld.events.map((ev, ei) => {
+                                                  const msg   = ev.message ?? ''
+                                                  const isErr = /error|fatal|exception/i.test(msg)
+                                                  const isWrn = /warn/i.test(msg)
+                                                  const ts    = ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''
+                                                  return (
+                                                    <div key={ei} style={{ color: isErr ? C.danger : isWrn ? C.warning : 'var(--tx-2)', marginBottom: 2 }}>
+                                                      {ts && <span style={{ color: 'var(--tx-3)', marginRight: 10, fontSize: 10 }}>{ts}</span>}
+                                                      {msg}
+                                                    </div>
+                                                  )
+                                                })}
+                                              </pre>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+
+                                {/* ── 6. TERMINOLOGY LEGEND ── */}
+                                <div style={{ background: 'var(--surface-3)', borderRadius: 'var(--r-md)', padding: '10px 14px', display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                                  <div style={{ fontSize: 10, color: 'var(--tx-3)' }}>
+                                    <span style={{ fontWeight: 700, color: 'var(--tx-2)' }}>Detections</span> — how many health checks reported this problem
+                                  </div>
+                                  <div style={{ fontSize: 10, color: 'var(--tx-3)' }}>
+                                    <span style={{ fontWeight: 700, color: 'var(--tx-2)' }}>Spike ratio</span> — how many times slower than the 30-day rolling average (1× = normal, 3× = 3 times slower)
+                                  </div>
+                                  <div style={{ fontSize: 10, color: 'var(--tx-3)' }}>
+                                    <span style={{ fontWeight: 700, color: 'var(--tx-2)' }}>Baseline</span> — rolling average response time from the past 30 days, used to detect what's abnormal
+                                  </div>
+                                </div>
+
+                              </div>
+                            </div>
+                          )
+                        })()}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
       </div>
 

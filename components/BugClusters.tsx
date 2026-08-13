@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react'
 import type { ErrorCluster, ParsedBug } from '@/lib/bugUtils'
 import { ROUTING_COLORS } from '@/lib/utils'
 import PageInfo from './ui/PageInfo'
-import { ChevronDown, ChevronRight, ExternalLink, Sparkles, Copy, CheckCheck, GitMerge, Search, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, ExternalLink, Sparkles, Copy, CheckCheck, GitMerge, Search, X, Wand2 } from 'lucide-react'
 
 type SortMode = 'count' | 'severity' | 'recent' | 'oldest' | 'component'
 const SEV_RANK: Record<string, number> = { P1: 0, P2: 1, P3: 2, P4: 3, unknown: 4 }
@@ -450,6 +450,26 @@ export default function BugClusters({ clusters, onAnalyse, onViewBug, onNavigate
   const [routingFilter, setRoutingFilter] = useState<string[]>([])
   const [componentFilter, setComponentFilter] = useState('all')
   const [sortBy, setSortBy] = useState<SortMode>('count')
+  const [inferring, setInferring] = useState(false)
+  const [inferResult, setInferResult] = useState<{ updatedComponent: number; updatedCategory: number; skipped: number } | null>(null)
+
+  const unknownCount = useMemo(() =>
+    clusters.filter(c => !c.routingTokens.length || !c.topComponent).length
+  , [clusters])
+
+  async function handleFixUnknowns() {
+    setInferring(true)
+    setInferResult(null)
+    try {
+      const res = await fetch('/api/update-components', { method: 'POST' })
+      const json = await res.json()
+      setInferResult(json)
+    } catch {
+      setInferResult(null)
+    } finally {
+      setInferring(false)
+    }
+  }
 
   const componentOptions = useMemo(() => {
     const set = new Set<string>()
@@ -584,6 +604,29 @@ export default function BugClusters({ clusters, onAnalyse, onViewBug, onNavigate
             }}>
               <GitMerge size={11} />
               {dupeGroups.length} duplicate group{dupeGroups.length !== 1 ? 's' : ''} ({dupeBugs} reports merged)
+            </span>
+          )}
+          {unknownCount > 0 && (
+            <button
+              onClick={handleFixUnknowns}
+              disabled={inferring}
+              title={`${unknownCount} clusters have no routing or component — click to infer from existing data`}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                fontSize: 11, fontWeight: 600,
+                background: inferring ? 'var(--surface-2)' : 'rgba(163,113,247,.12)',
+                color: inferring ? 'var(--tx-3)' : 'var(--purple)',
+                border: '1px solid rgba(163,113,247,.3)',
+                borderRadius: 'var(--r-sm)', padding: '3px 10px', cursor: inferring ? 'default' : 'pointer',
+              }}
+            >
+              <Wand2 size={11} />
+              {inferring ? 'Inferring…' : `Fix ${unknownCount} unknown${unknownCount !== 1 ? 's' : ''}`}
+            </button>
+          )}
+          {inferResult && (
+            <span style={{ fontSize: 11, color: 'var(--success)' }}>
+              ✓ {inferResult.updatedComponent} component{inferResult.updatedComponent !== 1 ? 's' : ''} · {inferResult.updatedCategory} categor{inferResult.updatedCategory !== 1 ? 'ies' : 'y'} updated · {inferResult.skipped} skipped
             </span>
           )}
         </div>

@@ -170,6 +170,52 @@ export default function PipelineTab() {
     } finally { setRequeuingAll(false) }
   }
 
+  const [backfillActive, setBackfillActive] = useState(false)
+  const [backfillProcessed, setBackfillProcessed] = useState(0)
+  const [backfillRemaining, setBackfillRemaining] = useState<number | null>(null)
+
+  const backfillSummaries = useCallback(async () => {
+    if (backfillActive) return
+    setBackfillActive(true)
+    setBackfillProcessed(0)
+    setBackfillRemaining(null)
+    let totalProcessed = 0
+    try {
+      while (true) {
+        const res = await fetch('/api/backfill-summaries', { method: 'POST' })
+        const data = await res.json() as { processed: number; failed: number; remaining: number; error?: string }
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        totalProcessed += data.processed
+        setBackfillProcessed(totalProcessed)
+        setBackfillRemaining(data.remaining)
+        if (data.remaining <= 0) break
+      }
+      toast.success('AI summaries backfilled', `${totalProcessed} summaries generated`)
+      refreshDataQuality()
+    } catch (err) {
+      toast.error('Backfill failed', err instanceof Error ? err.message : 'Unknown')
+    } finally {
+      setBackfillActive(false)
+      setBackfillRemaining(null)
+    }
+  }, [backfillActive, refreshDataQuality])
+
+  const [inferringComponents, setInferringComponents] = useState(false)
+  const inferComponents = async () => {
+    setInferringComponents(true)
+    try {
+      const res  = await fetch('/api/update-components', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+      toast.success('Component inference complete', `${data.updatedComponent ?? data.updated ?? 0} components · ${data.updatedCategory ?? 0} categories updated`)
+      refreshDataQuality()
+    } catch (err) {
+      toast.error('Component inference failed', err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setInferringComponents(false)
+    }
+  }
+
   const [retryingJira, setRetryingJira] = useState(false)
   const retryJira = async () => {
     setRetryingJira(true)
@@ -194,8 +240,17 @@ export default function PipelineTab() {
     { issue: 'Missing rollbar_id (user-submitted — expected)', count: null, loading: false },
     { issue: 'Missing jira_key AND NOT jira_pending (pipeline gap)', count: dq.missingJiraNotPending ?? null, loading: dqLoading },
     { issue: 'jira_pending = true (ticket creation failed)', count: dq.jiraPending ?? null, loading: dqLoading, action: retryJira, actionLabel: 'Retry all →', actionLoading: retryingJira },
-    { issue: 'ai_summary null (Gemini triage incomplete)', count: dq.aiSummaryNull ?? null, loading: dqLoading },
-    { issue: 'component = Unknown (Gemini couldn\'t classify)', count: dq.unknownComp ?? null, loading: dqLoading },
+    {
+      issue: 'ai_summary null (Gemini triage incomplete)',
+      count: dq.aiSummaryNull ?? null,
+      loading: dqLoading,
+      action: backfillSummaries,
+      actionLabel: backfillActive
+        ? `${backfillProcessed} done · ${backfillRemaining ?? '…'} left`
+        : 'Backfill all →',
+      actionLoading: backfillActive,
+    },
+    { issue: 'component = Unknown (Gemini couldn\'t classify)', count: dq.unknownComp ?? null, loading: dqLoading, action: inferComponents, actionLabel: 'Infer from endpoint →', actionLoading: inferringComponents },
     { issue: 'Missing severity (triage not run)', count: dq.missingSev ?? null, loading: dqLoading },
   ]
 

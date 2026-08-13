@@ -14,6 +14,7 @@ interface MonitorRow {
   type: 'http' | 'keyword' | 'json_api'
   enabled: boolean
   severity: 'critical' | 'warning' | 'info'
+  category: string | null
   interval_seconds: number
   degraded_threshold_ms: number | null
   status: 'up' | 'down' | 'degraded' | null
@@ -682,15 +683,29 @@ function computeMetrics(monitors: MonitorRow[], incidents: IncidentRow[]): Summa
 
 interface BulletPoint { icon: string; text: string; color: string; key: string }
 
+function deriveEnvironment(name: string): string {
+  if (name.endsWith('- Dev')  || name.startsWith('Dev '))  return 'Dev'
+  if (name.endsWith('- Env1') || name.startsWith('Env1 ')) return 'Env1'
+  if (name.endsWith('- Env3') || name.startsWith('Env3 ')) return 'Env3'
+  if (name.endsWith('- Env5') || name.startsWith('Env5 ')) return 'Env5'
+  return 'Global'
+}
+
 function buildBullets(m: SummaryMetrics): BulletPoint[] {
   if (m.enabled.length === 0) return [{ icon: '—', text: 'No monitors configured yet', color: C.muted, key: 'no-monitors' }]
   const bullets: BulletPoint[] = []
 
   if (m.down.length > 0) {
-    bullets.push({ icon: '✕', text: `${m.down.map(mon => mon.name).join(', ')} — currently down`, color: C.danger, key: `down:${m.down.map(mon => mon.id).join(',')}` })
+    const downText = m.down.length > 3
+      ? `${m.down.length} monitors currently down`
+      : `${m.down.map(mon => mon.name).join(', ')} — currently down`
+    bullets.push({ icon: '✕', text: downText, color: C.danger, key: `down:${m.down.map(mon => mon.id).join(',')}` })
   }
   if (m.degraded.length > 0) {
-    bullets.push({ icon: '⚠', text: `${m.degraded.map(mon => mon.name).join(', ')} — degraded performance`, color: C.warning, key: `degraded:${m.degraded.map(mon => mon.id).join(',')}` })
+    const degradedText = m.degraded.length > 3
+      ? `${m.degraded.length} monitors degraded`
+      : `${m.degraded.map(mon => mon.name).join(', ')} — degraded performance`
+    bullets.push({ icon: '⚠', text: degradedText, color: C.warning, key: `degraded:${m.degraded.map(mon => mon.id).join(',')}` })
   }
 
   const partial = m.enabled.filter(mon =>
@@ -711,7 +726,10 @@ function buildBullets(m: SummaryMetrics): BulletPoint[] {
 
   const perfect = m.enabled.filter(mon => (mon.uptime_7d ?? 0) >= 99.9 && mon.status !== 'down')
   if (perfect.length > 0) {
-    bullets.push({ icon: '✓', text: `${perfect.map(mon => mon.name).join(', ')} — 100% uptime (7d avg)`, color: C.success, key: `perfect:${perfect.map(p => p.id).join(',')}` })
+    const perfectText = perfect.length > 3
+      ? `${perfect.length} monitors — 100% uptime (7d avg)`
+      : `${perfect.map(mon => mon.name).join(', ')} — 100% uptime (7d avg)`
+    bullets.push({ icon: '✓', text: perfectText, color: C.success, key: `perfect:${perfect.map(p => p.id).join(',')}` })
   }
 
   const inc7d = m.incidents7d.length
@@ -2687,6 +2705,7 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
   const [customTo,         setCustomTo]         = useState(todayMYT)
   const [sparklineRange,   setSparklineRange]   = useState<CheckRange>('1h')
   const [dataLoading,      setDataLoading]      = useState(false)
+  const [collapsedEnvs,    setCollapsedEnvs]    = useState<Set<string>>(new Set())
   const [showDownPopover,  setShowDownPopover]  = useState(false)
   const [anomalies,        setAnomalies]        = useState<AnomalyRow[]>([])
   const [aiProcessing,     setAiProcessing]     = useState(false)
@@ -2818,15 +2837,40 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
       }
       setChecksByMonitor(checksMap)
 
-      // Override avg_response_24h with maintenance-excluded avg from the sparkline checks
-      // (checks already have isMaintenancePeriod filtered out, so this reflects active service hours only)
+      // Fetch a full 24h window of checks (all statuses) to compute maintenance-adjusted uptime.
+      // Sparkline checks may cover a shorter window so we need a dedicated query here.
+      const uptimeSince = new Date(Date.now() - 24 * 3_600_000).toISOString()
+      const { data: uptimeChecks } = await supabase
+        .from('checks')
+        .select('monitor_id, status, checked_at')
+        .in('monitor_id', monList.map(m => m.id))
+        .gte('checked_at', uptimeSince)
+        .order('checked_at', { ascending: false })
+        .limit(40000)
+
+      // Group uptime checks per monitor, excluding the 12am-9am MYT maintenance window
+      const uptimeMap: Record<string, { up: number; total: number }> = {}
+      for (const c of (uptimeChecks ?? []) as { monitor_id: string; status: string; checked_at: string }[]) {
+        if (isMaintenancePeriod(c.checked_at)) continue
+        if (!uptimeMap[c.monitor_id]) uptimeMap[c.monitor_id] = { up: 0, total: 0 }
+        uptimeMap[c.monitor_id].total++
+        if (c.status === 'up') uptimeMap[c.monitor_id].up++
+      }
+
+      // Override avg_response_24h with maintenance-excluded avg from sparkline checks, and
+      // override uptime_24h with maintenance-excluded uptime from the dedicated 24h fetch.
       const adjustedMonitors = monList.map(mon => {
         const checks = checksMap[mon.id] ?? []
         const validMs = checks
           .filter(c => c.status === 'up' && c.response_time_ms !== null && c.response_time_ms > 0 && c.response_time_ms < 9_500)
           .map(c => c.response_time_ms!)
-        if (validMs.length === 0) return mon
-        return { ...mon, avg_response_24h: Math.round(validMs.reduce((a, b) => a + b, 0) / validMs.length) }
+        const u = uptimeMap[mon.id]
+        const adjustedUptime24h = u && u.total >= 5 ? (u.up / u.total) * 100 : mon.uptime_24h
+        return {
+          ...mon,
+          avg_response_24h: validMs.length > 0 ? Math.round(validMs.reduce((a, b) => a + b, 0) / validMs.length) : mon.avg_response_24h,
+          uptime_24h: adjustedUptime24h,
+        }
       })
       setMonitors(adjustedMonitors)
 
@@ -3140,20 +3184,63 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
                   <Shield size={32} color="var(--tx-3)" aria-hidden />
                   <p style={{ fontSize: 14, color: 'var(--tx-3)', margin: 0 }}>No monitors configured yet.</p>
                 </div>
-              ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
-                  {monitors.map(m => (
-                    <MonitorCard
-                      key={m.id}
-                      monitor={m}
-                      checks={checksByMonitor[m.id] ?? []}
-                      onClick={() => setExpandedMonitor(m)}
-                      sparklineLabel={sparklineLabel}
-                      isLoading={dataLoading}
-                    />
-                  ))}
-                </div>
-              )}
+              ) : (() => {
+                const ENV_ORDER = ['Dev', 'Env1', 'Env3', 'Env5', 'Global']
+                const grouped = new Map<string, MonitorRow[]>()
+                for (const m of monitors) {
+                  const env = deriveEnvironment(m.name)
+                  if (!grouped.has(env)) grouped.set(env, [])
+                  grouped.get(env)!.push(m)
+                }
+                const sortedEnvs = ENV_ORDER.filter(e => grouped.has(e))
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {sortedEnvs.map(env => {
+                      const envMonitors = grouped.get(env)!
+                      const downCount     = envMonitors.filter(m => m.status === 'down').length
+                      const degradedCount = envMonitors.filter(m => m.status === 'degraded').length
+                      const isCollapsed   = collapsedEnvs.has(env)
+                      const toggle = () => setCollapsedEnvs(prev => {
+                        const next = new Set(prev)
+                        next.has(env) ? next.delete(env) : next.add(env)
+                        return next
+                      })
+                      const headerBg = downCount > 0 ? 'rgba(239,68,68,0.06)' : degradedCount > 0 ? 'rgba(245,158,11,0.06)' : 'var(--surface-2)'
+                      const headerBorder = downCount > 0 ? 'rgba(239,68,68,0.25)' : degradedCount > 0 ? 'rgba(245,158,11,0.25)' : 'var(--border)'
+                      return (
+                        <div key={env} style={{ borderWidth: 1, borderStyle: 'solid', borderColor: headerBorder, borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+                          <button
+                            onClick={toggle}
+                            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: headerBg, cursor: 'pointer', textAlign: 'left', border: 'none' }}
+                          >
+                            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx-1)', textTransform: env === 'Global' ? 'none' : 'uppercase', letterSpacing: env === 'Global' ? 0 : '0.06em', flex: 1 }}>
+                              {env === 'Global' ? 'Global / External' : env}
+                            </span>
+                            {downCount > 0 && (
+                              <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}>{downCount} down</span>
+                            )}
+                            {degradedCount > 0 && (
+                              <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: 'rgba(245,158,11,0.15)', color: '#f59e0b' }}>{degradedCount} degraded</span>
+                            )}
+                            {downCount === 0 && degradedCount === 0 && (
+                              <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: 'rgba(34,197,94,0.12)', color: '#22c55e' }}>all up</span>
+                            )}
+                            <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 4 }}>{envMonitors.length} monitors</span>
+                            <span style={{ fontSize: 12, color: 'var(--tx-3)', marginLeft: 4, transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)', transition: 'transform .2s', display: 'inline-block', lineHeight: 1 }}>▾</span>
+                          </button>
+                          {!isCollapsed && (
+                            <div style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16, borderTop: '1px solid var(--border)' }}>
+                              {envMonitors.map(m => (
+                                <MonitorCard key={m.id} monitor={m} checks={checksByMonitor[m.id] ?? []} onClick={() => setExpandedMonitor(m)} sparklineLabel={sparklineLabel} isLoading={dataLoading} />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })()}
             </>
           )
         })()}

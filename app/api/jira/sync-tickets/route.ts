@@ -31,9 +31,10 @@ const PRIORITY_TO_P: Record<string, string> = {
 // has no Browse Projects permission on YSC (see CLAUDE.md for the full diagnosis).
 function mapStatus(name: string | undefined): 'todo' | 'in_progress' | 'in_review' | 'done' {
   const s = (name || '').toLowerCase()
-  if (/done|closed|resolved|complete/.test(s)) return 'done'
-  if (/review/.test(s)) return 'in_review'
-  if (/progress|doing/.test(s)) return 'in_progress'
+  // Word boundaries prevent false positives like "incomplete" matching "complete".
+  if (/\b(done|closed|resolved|complete)\b/.test(s)) return 'done'
+  if (/\breview\b/.test(s)) return 'in_review'
+  if (/\b(progress|doing)\b/.test(s)) return 'in_progress'
   return 'todo'
 }
 

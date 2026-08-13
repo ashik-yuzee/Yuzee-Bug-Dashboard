@@ -24,6 +24,7 @@
   --orange-ring:  rgba(249,115,22,.40);
 
   /* Severity — all pass AA on surface-1 */
+  --p0: #FF1744;   /* 5.2:1 — critical emergency, distinct from P1 */
   --p1: #FF7B72;   /* 4.88:1 */
   --p2: #E3B341;   /* 8.89:1 */
   --p3: #58A6FF;   /* 6.85:1 */
@@ -48,6 +49,7 @@
   --module-infra: var(--danger);
 
   /* Dim backgrounds (for badges/pills — purely decorative) */
+  --p0-dim:     rgba(255,23,68,.12);
   --p1-dim:     rgba(255,123,114,.10);
   --p2-dim:     rgba(227,179,65, .10);
   --p3-dim:     rgba(88,166,255, .10);
@@ -93,6 +95,7 @@ html.light {
   --orange-ring:  rgba(194,65,12,.40);
 
   /* Severity — recalibrated for light backgrounds, all pass AA */
+  --p0: #CC0033;   /* 5.4:1 — critical emergency */
   --p1: #C91B12;   /* 5.1:1 — red */
   --p2: #A15C07;   /* 4.8:1 — amber */
   --p3: #1A4FCC;   /* 5.7:1 — blue */

@@ -1,10 +1,17 @@
 'use client'
 
+import { useMemo } from 'react'
 import type { ParsedBug, DashboardStats } from '@/lib/bugUtils'
+import type { InternalTicket } from '@/components/DashboardClient'
 import { ROUTING_COLORS } from '@/lib/utils'
-import { ExternalLink, AlertTriangle, User } from 'lucide-react'
+import { ExternalLink, AlertTriangle, User, Ticket } from 'lucide-react'
 
-interface Props { bugs: ParsedBug[]; stats: DashboardStats; onViewBugs?: (routing: string) => void }
+interface Props {
+  bugs: ParsedBug[]
+  stats: DashboardStats
+  tickets?: InternalTicket[]
+  onViewBugs?: (routing: string) => void
+}
 
 const SEV: Record<string, string> = { P1: 'var(--p1)', P2: 'var(--p2)', P3: 'var(--p3)', P4: 'var(--p4)' }
 
@@ -13,11 +20,22 @@ interface Dev {
   note?: string
 }
 
-const DEVS: Dev[] = [
-  { name: 'Junaid',    role: 'Backend Engineer',        routing: 'BACKEND', emoji: '⚙️',  note: 'Java / Spring Boot / AWS' },
-  { name: 'Shaqeeba',  role: 'Mobile Engineer',         routing: 'MOBILE',  emoji: '📱',  note: 'iOS / Android / Flutter' },
-  { name: 'Ramzan',    role: 'Frontend Engineer',        routing: 'WEB',     emoji: '🌐',  note: 'React / Next.js / TypeScript' },
-  { name: 'Asif',      role: 'AI / Data Engineer',      routing: 'Unknown', emoji: '🤖',  note: 'Gemini / n8n / Analytics' },
+// Canonical name → normalized display name. Handles Jira full-name vs short-name mismatches.
+const NAME_ALIASES: Record<string, string> = {
+  'muhammad junaid ishaq': 'junaid',
+  'junaid ishaq': 'junaid',
+  'm. junaid ishaq': 'junaid',
+}
+
+function normalizeAssigneeName(raw: string): string {
+  return NAME_ALIASES[raw.toLowerCase()] ?? raw.toLowerCase()
+}
+
+const CORE_DEVS: Dev[] = [
+  { name: 'Junaid',    role: 'Backend Engineer',   routing: 'BACKEND', emoji: '⚙️',  note: 'Java / Spring Boot / AWS' },
+  { name: 'Shaqeeba',  role: 'Mobile Engineer',     routing: 'MOBILE',  emoji: '📱',  note: 'iOS / Android / Flutter' },
+  { name: 'Ramzan',    role: 'Frontend Engineer',   routing: 'WEB',     emoji: '🌐',  note: 'React / Next.js / TypeScript' },
+  { name: 'Asif',      role: 'AI / Data Engineer',  routing: 'Unknown', emoji: '🤖',  note: 'Gemini / n8n / Analytics' },
 ]
 
 function Bar({ value, max, color }: { value: number; max: number; color: string }) {
@@ -28,7 +46,7 @@ function Bar({ value, max, color }: { value: number; max: number; color: string 
   )
 }
 
-function DevCard({ dev, bugs, onView }: { dev: Dev; bugs: ParsedBug[]; onView?: () => void }) {
+function DevCard({ dev, bugs, tickets, onView }: { dev: Dev; bugs: ParsedBug[]; tickets: InternalTicket[]; onView?: () => void }) {
   const rc = dev.routing !== 'Unknown' ? ROUTING_COLORS[dev.routing as 'BACKEND' | 'MOBILE' | 'WEB'] : null
 
   const total   = bugs.length
@@ -40,8 +58,11 @@ function DevCard({ dev, bugs, onView }: { dev: Dev; bugs: ParsedBug[]; onView?: 
   const pending = bugs.filter(b => b.jira_pending === true).length
   const open    = bugs.filter(b => b.status !== 'complete' && b.status !== 'resolved').length
 
-  const maxSev = Math.max(p1, p2, p3, p4, 1)
+  const devName   = normalizeAssigneeName(dev.name)
+  const openTix   = tickets.filter(t => normalizeAssigneeName(t.assignee ?? '') === devName && t.status !== 'done').length
+  const closedTix = tickets.filter(t => normalizeAssigneeName(t.assignee ?? '') === devName && t.status === 'done').length
 
+  const maxSev  = Math.max(p1, p2, p3, p4, 1)
   const urgency = p1 > 0 ? 'critical' : p2 > 3 ? 'warning' : 'normal'
 
   return (
@@ -72,7 +93,7 @@ function DevCard({ dev, bugs, onView }: { dev: Dev; bugs: ParsedBug[]; onView?: 
         </div>
         <div style={{ textAlign: 'right' }}>
           <p style={{ fontSize: 32, fontWeight: 800, color: urgency === 'critical' ? 'var(--p1)' : urgency === 'warning' ? 'var(--p2)' : rc?.color || 'var(--tx-1)', lineHeight: 1 }}>{total}</p>
-          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 2 }}>{open} open</p>
+          <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 2 }}>{open} open bug{open !== 1 ? 's' : ''}</p>
         </div>
       </div>
 
@@ -97,6 +118,24 @@ function DevCard({ dev, bugs, onView }: { dev: Dev; bugs: ParsedBug[]; onView?: 
         ))}
       </div>
 
+      {/* Ticket counts */}
+      {(openTix + closedTix) > 0 && (
+        <div style={{ display: 'flex', gap: 10, padding: '8px 10px', background: 'var(--surface-2)', borderRadius: 'var(--r-md)', border: '1px solid var(--border)' }}>
+          <Ticket size={12} color="var(--tx-3)" style={{ marginTop: 1, flexShrink: 0 }} aria-hidden />
+          <div style={{ display: 'flex', gap: 12 }}>
+            <div>
+              <p style={{ fontSize: 16, fontWeight: 700, color: '#22c55e', lineHeight: 1 }}>{openTix}</p>
+              <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 2 }}>open tickets</p>
+            </div>
+            <div style={{ width: 1, background: 'var(--border)', flexShrink: 0 }} />
+            <div>
+              <p style={{ fontSize: 16, fontWeight: 700, color: 'var(--tx-3)', lineHeight: 1 }}>{closedTix}</p>
+              <p style={{ fontSize: 10, color: 'var(--tx-3)', marginTop: 2 }}>closed</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Attention items */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {noJira > 0 && (
@@ -114,7 +153,7 @@ function DevCard({ dev, bugs, onView }: { dev: Dev; bugs: ParsedBug[]; onView?: 
       </div>
 
       {/* View link */}
-      {onView && (
+      {onView && dev.routing !== 'Unknown' && (
         <button onClick={onView} style={{ display: 'flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start', fontSize: 12, fontWeight: 600, color: rc?.color || 'var(--orange)', background: rc ? rc.bg : 'var(--orange-dim)', border: `1px solid ${rc ? rc.border : 'rgba(249,115,22,.25)'}`, borderRadius: 'var(--r-md)', padding: '5px 12px', cursor: 'pointer', transition: 'opacity .15s' }}>
           View their bugs <ExternalLink size={11} aria-hidden />
         </button>
@@ -123,17 +162,35 @@ function DevCard({ dev, bugs, onView }: { dev: Dev; bugs: ParsedBug[]; onView?: 
   )
 }
 
-export default function DeveloperView({ bugs, stats, onViewBugs }: Props) {
+export default function DeveloperView({ bugs, stats, tickets = [], onViewBugs }: Props) {
   const unresolvedBugs = bugs.filter(b => b.status !== 'complete' && b.status !== 'resolved')
+
+  // Discover any additional assignees from tickets not already in the core dev list
+  const allDevs = useMemo((): Dev[] => {
+    const knownNormalized = new Set(CORE_DEVS.map(d => normalizeAssigneeName(d.name)))
+    const extra: Dev[] = []
+    const seen = new Set<string>()
+    for (const t of tickets) {
+      const raw = t.assignee?.trim()
+      if (!raw) continue
+      const norm = normalizeAssigneeName(raw)
+      if (knownNormalized.has(norm) || seen.has(norm)) continue
+      seen.add(norm)
+      extra.push({ name: raw, role: 'Engineer', routing: 'Unknown', emoji: '👤' })
+    }
+    return [...CORE_DEVS, ...extra]
+  }, [tickets])
 
   const devBugs = (dev: Dev) => {
     if (dev.routing === 'Unknown') {
-      return bugs.filter(b => !b.routingToken)
+      // Unknown routing-token bugs go to Asif; extra devs only show ticket data
+      if (dev.name === 'Asif') return bugs.filter(b => !b.routingToken)
+      return []
     }
     return bugs.filter(b => b.routingToken === dev.routing)
   }
 
-  const devsWithBugs = DEVS.map(dev => ({
+  const devsWithData = allDevs.map(dev => ({
     dev,
     bugs: devBugs(dev),
   })).sort((a, b) => {
@@ -153,7 +210,7 @@ export default function DeveloperView({ bugs, stats, onViewBugs }: Props) {
           <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--tx-1)' }}>
             Total unresolved bugs: <strong style={{ color: 'var(--orange)' }}>{unresolvedBugs.length}</strong>
             <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--tx-3)', marginLeft: 8 }}>
-              — distributed across {DEVS.length} developers
+              — distributed across {allDevs.length} developer{allDevs.length !== 1 ? 's' : ''}
             </span>
           </p>
           <p style={{ fontSize: 11, color: 'var(--tx-3)', marginTop: 3 }}>
@@ -161,7 +218,7 @@ export default function DeveloperView({ bugs, stats, onViewBugs }: Props) {
           </p>
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 16 }}>
-          {stats.routingBreakdown.map(r => {
+          {stats.routingBreakdown.map((r: { routing: string; count: number }) => {
             const rc = r.routing !== 'Unknown' ? ROUTING_COLORS[r.routing as 'BACKEND' | 'MOBILE' | 'WEB'] : null
             return (
               <div key={r.routing} style={{ textAlign: 'center' }}>
@@ -175,12 +232,13 @@ export default function DeveloperView({ bugs, stats, onViewBugs }: Props) {
 
       {/* Dev cards grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16 }}>
-        {devsWithBugs.map(({ dev, bugs: devBugList }) => (
+        {devsWithData.map(({ dev, bugs: devBugList }) => (
           <DevCard
             key={dev.name}
             dev={dev}
             bugs={devBugList}
-            onView={onViewBugs ? () => onViewBugs(dev.routing) : undefined}
+            tickets={tickets}
+            onView={onViewBugs && dev.routing !== 'Unknown' ? () => onViewBugs(dev.routing) : undefined}
           />
         ))}
       </div>
@@ -190,41 +248,48 @@ export default function DeveloperView({ bugs, stats, onViewBugs }: Props) {
         <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
           <p style={{ fontWeight: 600, fontSize: 13, color: 'var(--tx-1)' }}>Team Summary</p>
         </div>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
-              {['Developer', 'Total', 'P1', 'P2', 'P3', 'P4', 'No Jira', 'Jira Failed', 'Open'].map(h => (
-                <th key={h} style={{ padding: '7px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em' }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {devsWithBugs.map(({ dev, bugs: db }) => {
-              const rc = dev.routing !== 'Unknown' ? ROUTING_COLORS[dev.routing as 'BACKEND' | 'MOBILE' | 'WEB'] : null
-              return (
-                <tr key={dev.name} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '8px 12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                      <span>{dev.emoji}</span>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx-1)' }}>{dev.name}</span>
-                      {rc && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 3, background: rc.bg, color: rc.color }}>{dev.routing}</span>}
-                    </div>
-                  </td>
-                  <td style={{ padding: '8px 12px', fontSize: 14, fontWeight: 700, color: 'var(--tx-1)' }}>{db.length}</td>
-                  {([['P1', 'var(--p1)'], ['P2', 'var(--p2)'], ['P3', 'var(--p3)'], ['P4', 'var(--p4)']] as [string, string][]).map(([sev, col]) => {
-                    const cnt = db.filter(b => b.severity === sev).length
-                    return <td key={sev} style={{ padding: '8px 12px', fontSize: 13, fontWeight: cnt > 0 ? 700 : 400, color: cnt > 0 ? col : 'var(--tx-3)' }}>{cnt}</td>
-                  })}
-                  <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx-2)' }}>{db.filter(b => !b.jira_key && !b.jira_pending).length}</td>
-                  <td style={{ padding: '8px 12px', fontSize: 12, color: db.filter(b => b.jira_pending).length > 0 ? 'var(--warning)' : 'var(--tx-3)' }}>
-                    {db.filter(b => b.jira_pending).length}
-                  </td>
-                  <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx-2)' }}>{db.filter(b => b.status !== 'complete' && b.status !== 'resolved').length}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
+                {['Developer', 'Bugs', 'P1', 'P2', 'P3', 'P4', 'No Jira', 'Jira Failed', 'Open Bugs', 'Open Tix', 'Closed Tix'].map(h => (
+                  <th key={h} style={{ padding: '7px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--tx-3)', textTransform: 'uppercase', letterSpacing: '.06em', whiteSpace: 'nowrap' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {devsWithData.map(({ dev, bugs: db }) => {
+                const rc      = dev.routing !== 'Unknown' ? ROUTING_COLORS[dev.routing as 'BACKEND' | 'MOBILE' | 'WEB'] : null
+                const devName = dev.name.toLowerCase()
+                const openTix   = tickets.filter(t => t.assignee?.toLowerCase() === devName && t.status !== 'done').length
+                const closedTix = tickets.filter(t => t.assignee?.toLowerCase() === devName && t.status === 'done').length
+                return (
+                  <tr key={dev.name} style={{ borderBottom: '1px solid var(--border)' }}>
+                    <td style={{ padding: '8px 12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                        <span>{dev.emoji}</span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx-1)' }}>{dev.name}</span>
+                        {rc && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 3, background: rc.bg, color: rc.color }}>{dev.routing}</span>}
+                      </div>
+                    </td>
+                    <td style={{ padding: '8px 12px', fontSize: 14, fontWeight: 700, color: 'var(--tx-1)' }}>{db.length}</td>
+                    {([['P1', 'var(--p1)'], ['P2', 'var(--p2)'], ['P3', 'var(--p3)'], ['P4', 'var(--p4)']] as [string, string][]).map(([sev, col]) => {
+                      const cnt = db.filter(b => b.severity === sev).length
+                      return <td key={sev} style={{ padding: '8px 12px', fontSize: 13, fontWeight: cnt > 0 ? 700 : 400, color: cnt > 0 ? col : 'var(--tx-3)' }}>{cnt}</td>
+                    })}
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx-2)' }}>{db.filter(b => !b.jira_key && !b.jira_pending).length}</td>
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: db.filter(b => b.jira_pending).length > 0 ? 'var(--warning)' : 'var(--tx-3)' }}>
+                      {db.filter(b => b.jira_pending).length}
+                    </td>
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx-2)' }}>{db.filter(b => b.status !== 'complete' && b.status !== 'resolved').length}</td>
+                    <td style={{ padding: '8px 12px', fontSize: 13, fontWeight: openTix > 0 ? 700 : 400, color: openTix > 0 ? '#22c55e' : 'var(--tx-3)' }}>{openTix}</td>
+                    <td style={{ padding: '8px 12px', fontSize: 13, color: 'var(--tx-3)' }}>{closedTix}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
     </div>

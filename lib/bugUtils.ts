@@ -1,5 +1,5 @@
 import type { BugReport } from '@/components/DashboardClient'
-import { deriveRoutingToken } from '@/lib/utils'
+import { deriveRoutingToken, inferComponent } from '@/lib/utils'
 
 export interface ParsedBug extends BugReport {
   errorType: 'TypeError' | 'NullPointerException' | 'InvokeException' | 'HttpError' | 'ChunkLoadError' | 'RateLimit' | 'Unimplemented' | 'Unknown'
@@ -106,10 +106,24 @@ function normalizeDescription(desc: string): string {
   const firstLine = desc.split('\n')[0].trim()
   return firstLine
     .replace(/0x[0-9a-f]+/gi, '<addr>')
+    // Strip fully-qualified Java/Kotlin class names (com.xxx, org.xxx, java.xxx, etc.)
+    .replace(/\b(com|org|net|io|java|javax|sun|android|kotlin)\.[a-zA-Z][a-zA-Z0-9._$]+/g, '<cls>')
+    // Strip UUIDs
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
+    // Strip long hex IDs
     .replace(/\b[0-9a-f]{8,}\b/g, '<id>')
+    // Strip line:col refs
     .replace(/:\d+:\d+/g, ':N:N')
+    // Strip user ID path segments
     .replace(/\/users\/[^/\s]+/g, '/users/<id>')
+    // Strip numeric path segments (e.g. /items/123 → /items/<n>)
+    .replace(/\/\d+(?=\/|$|\s|")/g, '/<n>')
+    // Strip ISO timestamps
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/g, '<ts>')
+    // Collapse Java generic/BSON type args that were reduced to <cls> above
+    .replace(/\[<cls>[^\]]*\]/g, '[<type>]')
+    // Strip remaining large numeric IDs (8+ digits)
+    .replace(/\b\d{8,}\b/g, '<n>')
     .slice(0, 120)
 }
 
@@ -148,6 +162,8 @@ export function parseBug(bug: BugReport): ParsedBug {
 
   return {
     ...bug,
+    // Use inferred component when the raw value is null or 'Unknown'
+    component: inferComponent(bug) || bug.component,
     errorType,
     environment,
     pageUrl,
@@ -162,7 +178,13 @@ export function parseBug(bug: BugReport): ParsedBug {
 export function clusterByDescription(bugs: ParsedBug[]): ErrorCluster[] {
   const groups: Record<string, ParsedBug[]> = {}
   for (const b of bugs) {
-    const key = normalizeDescription(b.description || 'Unknown error')
+    // Prefer stable semantic fingerprints when available — Rollbar computes these from the
+    // error class + message pattern and are far more reliable than text normalization alone.
+    // Fall back to description normalization for user reports and CloudWatch logs.
+    const key =
+      (b.rollbar_hash   && b.rollbar_hash.length   > 4 ? `rb:${b.rollbar_hash}`   : null) ??
+      (b.error_fingerprint && b.error_fingerprint.length > 4 ? `fp:${b.error_fingerprint}` : null) ??
+      normalizeDescription(b.description || 'Unknown error')
     if (!groups[key]) groups[key] = []
     groups[key].push(b)
   }

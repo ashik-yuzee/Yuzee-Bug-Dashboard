@@ -14,12 +14,29 @@ import { Plus, RefreshCw, LayoutGrid, List as ListIcon, Cloud, Loader2 } from 'l
 const AUTO_SYNC_INTERVAL_MS = 5 * 60_000
 const SPACE_KEY = 'yuzee-tickets-space'
 
-type SpaceFilter = 'all' | 'YSC' | 'YSDT'
+type SpaceFilter    = 'all' | 'YSC' | 'YSDT'
+type PlatformFilter = 'all' | 'BACKEND' | 'MOBILE' | 'WEB'
 
 function ticketSpace(key: string): 'internal' | 'YSC' | 'YSDT' {
   if (key.startsWith('YSC-'))  return 'YSC'
   if (key.startsWith('YSDT-')) return 'YSDT'
   return 'internal'
+}
+
+/* ── Platform helpers ────────────────────────────────────────────── */
+
+function parseRoutingFromTitle(title: string | null | undefined): PlatformFilter {
+  if (!title) return 'all'
+  if (title.includes('[BACKEND]')) return 'BACKEND'
+  if (title.includes('[MOBILE]'))  return 'MOBILE'
+  if (title.includes('[WEB]'))     return 'WEB'
+  return 'all'
+}
+
+const PLATFORM_COLORS: Record<string, { bg: string; color: string; border: string }> = {
+  BACKEND: { bg: 'rgba(139,92,246,.12)', color: '#a78bfa', border: 'rgba(139,92,246,.25)' },
+  MOBILE:  { bg: 'rgba(20,184,166,.12)', color: '#2dd4bf', border: 'rgba(20,184,166,.25)' },
+  WEB:     { bg: 'rgba(34,197,94,.12)',  color: '#4ade80', border: 'rgba(34,197,94,.25)'  },
 }
 
 /* ── YSC helpers ─────────────────────────────────────────────────── */
@@ -308,6 +325,8 @@ export default function TicketsTab({ tickets, loading, error, refresh, onOpen, o
   const [showCreate, setShowCreate] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [spaceFilter, setSpaceFilter] = useState<SpaceFilter>('YSDT')
+  const [platformFilter, setPlatformFilter] = useState<PlatformFilter>('all')
+  const [assigneeFilter, setAssigneeFilter] = useState<string>('all')
 
   // Restore the space preference after mount (localStorage is a genuine external
   // system, unavailable during SSR) — deferred a tick so the effect body itself never
@@ -366,16 +385,53 @@ export default function TicketsTab({ tickets, loading, error, refresh, onOpen, o
     return map
   }, [bugs])
 
+  // Bug-derived routing map so we can filter tickets by platform
+  const jiraKeyToRouting = useMemo(() => {
+    const map: Record<string, PlatformFilter> = {}
+    for (const b of bugs) {
+      if (b.jira_key && b.routingToken) map[b.jira_key] = b.routingToken as PlatformFilter
+    }
+    return map
+  }, [bugs])
+
+  const ticketRouting = (t: InternalTicket): PlatformFilter =>
+    jiraKeyToRouting[t.ticket_key] ?? parseRoutingFromTitle(t.title)
+
   const spaceCounts = useMemo(() => ({
     all:  tickets.filter(t => t.status !== 'done').length,
     YSDT: tickets.filter(t => ticketSpace(t.ticket_key) === 'YSDT' && t.status !== 'done').length,
     YSC:  tickets.filter(t => ticketSpace(t.ticket_key) === 'YSC'  && t.status !== 'done').length,
   }), [tickets])
 
-  const visibleTickets = useMemo(() => {
+  const spaceTickets = useMemo(() => {
     if (spaceFilter === 'all') return tickets.filter(t => ticketSpace(t.ticket_key) !== 'internal')
     return tickets.filter(t => ticketSpace(t.ticket_key) === spaceFilter)
   }, [tickets, spaceFilter])
+
+  // Platform counts over all spaceTickets (before assignee filter)
+  const platformCounts = useMemo(() => ({
+    all:     spaceTickets.filter(t => t.status !== 'done').length,
+    BACKEND: spaceTickets.filter(t => t.status !== 'done' && ticketRouting(t) === 'BACKEND').length,
+    MOBILE:  spaceTickets.filter(t => t.status !== 'done' && ticketRouting(t) === 'MOBILE').length,
+    WEB:     spaceTickets.filter(t => t.status !== 'done' && ticketRouting(t) === 'WEB').length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [spaceTickets, jiraKeyToRouting])
+
+  // Unique assignees across ALL non-internal tickets so the dropdown is always
+  // comprehensive — not scoped to the current space filter.
+  const assignees = useMemo(() => {
+    const set = new Set<string>()
+    for (const t of tickets) if (t.assignee && ticketSpace(t.ticket_key) !== 'internal') set.add(t.assignee)
+    return Array.from(set).sort()
+  }, [tickets])
+
+  const visibleTickets = useMemo(() => {
+    let out = spaceTickets
+    if (platformFilter !== 'all') out = out.filter(t => ticketRouting(t) === platformFilter)
+    if (assigneeFilter !== 'all') out = out.filter(t => t.assignee === assigneeFilter)
+    return out
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spaceTickets, platformFilter, assigneeFilter, jiraKeyToRouting])
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -386,7 +442,7 @@ export default function TicketsTab({ tickets, loading, error, refresh, onOpen, o
         minutes, or click <strong>Sync from Jira</strong> to pull the latest now.
       </PageInfo>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-        {/* Left: view switcher + space filter */}
+        {/* Left: view switcher + space filter + platform filter + assignee filter */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', gap: 4, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: 3 }}>
             {SUB_TABS.map(t => (
@@ -423,6 +479,47 @@ export default function TicketsTab({ tickets, loading, error, refresh, onOpen, o
               )
             })}
           </div>
+          {/* Platform filter */}
+          <div style={{ display: 'flex', gap: 3, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: 3 }}>
+            {(['all', 'BACKEND', 'MOBILE', 'WEB'] as PlatformFilter[]).map(pf => {
+              const pc      = pf !== 'all' ? PLATFORM_COLORS[pf] : null
+              const active  = platformFilter === pf
+              const cnt     = platformCounts[pf]
+              return (
+                <button key={pf} onClick={() => setPlatformFilter(pf)} style={{
+                  fontSize: 11, fontWeight: active ? 700 : 400, padding: '4px 10px', borderRadius: 'var(--r-sm)',
+                  background: active ? (pc ? pc.bg : 'rgba(255,255,255,.08)') : 'transparent',
+                  color:      active ? (pc ? pc.color : 'var(--tx-1)') : 'var(--tx-3)',
+                  border:     active ? `1px solid ${pc ? pc.border : 'rgba(255,255,255,.15)'}` : 'none',
+                  cursor: 'pointer', transition: 'all .15s', display: 'flex', alignItems: 'center', gap: 4,
+                }}>
+                  {pf === 'all' ? 'All platforms' : pf}
+                  <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 10, background: 'rgba(255,255,255,.07)', color: active ? (pc?.color ?? 'var(--tx-2)') : 'var(--tx-3)' }}>
+                    {cnt}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+          {/* Assignee filter */}
+          {assignees.length > 0 && (
+            <select
+              value={assigneeFilter}
+              onChange={e => setAssigneeFilter(e.target.value)}
+              style={{
+                fontSize: 11, padding: '5px 9px', borderRadius: 'var(--r-md)',
+                background: assigneeFilter !== 'all' ? 'rgba(249,115,22,.12)' : 'var(--surface-2)',
+                color: assigneeFilter !== 'all' ? 'var(--orange)' : 'var(--tx-2)',
+                border: `1px solid ${assigneeFilter !== 'all' ? 'rgba(249,115,22,.35)' : 'var(--border)'}`,
+                cursor: 'pointer', outline: 'none', appearance: 'none',
+                paddingRight: 28,
+                backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'12\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'%236b7280\' stroke-width=\'2\'%3E%3Cpolyline points=\'6 9 12 15 18 9\'/%3E%3C/svg%3E")',
+                backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center',
+              }}>
+              <option value="all">All assignees</option>
+              {assignees.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          )}
         </div>
         {/* Right: actions */}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

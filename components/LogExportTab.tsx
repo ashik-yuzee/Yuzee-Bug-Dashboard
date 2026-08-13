@@ -429,38 +429,53 @@ export default function LogExportTab() {
           )}
         </SectionCard>
 
-        {/* ── Action button ─────────────────────────────────────────────────── */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {!running ? (
-            <button onClick={startExport} disabled={noSources} style={{
-              display: 'flex', alignItems: 'center', gap: 8, padding: '10px 24px',
-              background: noSources ? 'var(--surface-2)' : 'var(--orange)',
-              color: noSources ? 'var(--tx-3)' : '#fff',
-              border: `1px solid ${noSources ? 'var(--border)' : 'var(--orange)'}`,
-              borderRadius: 'var(--r-md)', fontSize: 13, fontWeight: 700,
-              cursor: noSources ? 'not-allowed' : 'pointer',
-              transition: 'opacity .15s',
-            }}>
-              <Play size={14} aria-hidden /> Export Logs
-            </button>
-          ) : (
-            <button onClick={stopExport} style={{
-              display: 'flex', alignItems: 'center', gap: 8, padding: '10px 24px',
-              background: 'rgba(239,68,68,.1)', color: 'var(--danger)',
-              border: '1px solid rgba(239,68,68,.3)',
-              borderRadius: 'var(--r-md)', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-            }}>
-              <Square size={14} aria-hidden /> Stop Export
-            </button>
-          )}
-
-          {done && !running && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--success)', fontWeight: 600 }}>
-              <CheckCircle size={14} aria-hidden />
-              {files.length} file{files.length !== 1 ? 's' : ''} ready
-              {totalBytes > 0 && <span style={{ fontWeight: 400, color: 'var(--tx-3)' }}>· {fmtBytes(totalBytes)}</span>}
+        {/* ── Run / Stop ───────────────────────────────────────────────────── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
+          background: 'var(--surface-1)', border: '1px solid var(--border)',
+          borderRadius: 'var(--r-lg)', padding: '14px 20px',
+        }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx-1)' }}>
+              {isRangeMode ? 'Generate range export' : 'Export single day'}
             </span>
-          )}
+            <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>
+              {noSources ? 'Select at least one source above.' : isRangeMode
+                ? 'Streams one ZIP per day — keep this tab open.'
+                : 'Downloads a single ZIP when complete.'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {done && !running && (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--success)', fontWeight: 600 }}>
+                <CheckCircle size={14} aria-hidden />
+                {files.length} file{files.length !== 1 ? 's' : ''} ready
+                {totalBytes > 0 && <span style={{ fontWeight: 400, color: 'var(--tx-3)' }}>· {fmtBytes(totalBytes)}</span>}
+              </span>
+            )}
+            {!running ? (
+              <button onClick={startExport} disabled={noSources} style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '10px 24px',
+                background: noSources ? 'var(--surface-2)' : 'var(--orange)',
+                color: noSources ? 'var(--tx-3)' : '#fff',
+                border: `1px solid ${noSources ? 'var(--border)' : 'var(--orange)'}`,
+                borderRadius: 'var(--r-md)', fontSize: 13, fontWeight: 700,
+                cursor: noSources ? 'not-allowed' : 'pointer',
+                transition: 'opacity .15s', flexShrink: 0,
+              }}>
+                <Play size={14} aria-hidden /> Export Logs
+              </button>
+            ) : (
+              <button onClick={stopExport} style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '10px 24px',
+                background: 'rgba(239,68,68,.1)', color: 'var(--danger)',
+                border: '1px solid rgba(239,68,68,.3)',
+                borderRadius: 'var(--r-md)', fontSize: 13, fontWeight: 700, cursor: 'pointer', flexShrink: 0,
+              }}>
+                <Square size={14} aria-hidden /> Stop Export
+              </button>
+            )}
+          </div>
         </div>
 
         {/* ── Progress ─────────────────────────────────────────────────────── */}

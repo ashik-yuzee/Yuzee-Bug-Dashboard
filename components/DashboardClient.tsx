@@ -390,6 +390,8 @@ const S = {
   body: { display:'flex', flex:1, overflow:'hidden' } as const,
 }
 
+const JIRA_DONE_RE = /\b(done|closed|resolved|complete)\b/i
+
 export default function DashboardClient({ user, initialBugs, initialTab }: Props) {
   const supabase = useMemo(() => createClient(), [])
   const { theme, toggleTheme } = useTheme()
@@ -413,6 +415,7 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
   const [detailTicket, setDetailTicket] = useState<InternalTicket | null>(null)
   const [tickets, setTickets] = useState<InternalTicket[]>(fetchedTickets)
   const [refreshing, setRefreshing] = useState(false)
+  const [syncingJira, setSyncingJira] = useState(false)
   const [dismissedBanners, setDismissedBanners] = useState<Set<string>>(new Set())
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const prevOnline = useRef<boolean | null>(null)
@@ -515,6 +518,25 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
 
   const handleSignOut = () => logoutAction()
 
+  const handleSyncJira = useCallback(async () => {
+    if (syncingJira) return
+    setSyncingJira(true)
+    const tid = toast.loading('Syncing Jira tickets…')
+    try {
+      const res = await fetch('/api/jira/sync-tickets', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      toast.dismiss(tid)
+      toast.success('Jira sync complete', `${data.synced} tickets synced`)
+      refreshTickets()
+    } catch (err) {
+      toast.dismiss(tid)
+      toast.error('Jira sync failed', err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setSyncingJira(false)
+    }
+  }, [syncingJira, refreshTickets])
+
   const handleAbsorbNew = useCallback(() => {
     setBugs(prev => {
       const existingIds = new Set(prev.map(b => b.report_id))
@@ -536,10 +558,13 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
 
   const jiraPendingCount = useMemo(() => parsedBugs.filter(b => b.jira_pending === true).length, [parsedBugs])
 
-  // Set of jira_keys whose internal_tickets entry is status='done' (closed in Jira).
-  // Bugs linked to a closed ticket are hidden by default (jiraClosed='open_only').
+  // Set of jira_keys whose ticket is closed in Jira.
+  // Checks both the mapped status ('done') and the raw jira_status string so stale
+  // internal_tickets rows that haven't been re-synced don't cause false positives.
   const closedJiraKeys = useMemo(
-    () => new Set(tickets.filter(t => t.status === 'done').map(t => t.ticket_key)),
+    () => new Set(tickets.filter(t =>
+      t.status === 'done' || JIRA_DONE_RE.test(t.jira_status || '')
+    ).map(t => t.ticket_key)),
     [tickets]
   )
   const stuckCount = queueStats.stuckItems.length
@@ -905,7 +930,29 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
                 {theme === 'dark' ? <Sun size={14} aria-hidden /> : <Moon size={14} aria-hidden />}
               </button>
 
+              {activeTab !== 'server-health' && (<>
               <div style={S.divider} aria-hidden />
+
+              <button
+                onClick={handleSyncJira}
+                disabled={syncingJira || online === false}
+                aria-label="Sync Jira ticket statuses"
+                title={online === false ? 'Unavailable offline' : 'Sync open/closed status from Jira'}
+                style={{
+                  display:'flex', alignItems:'center', gap:5, flexShrink:0,
+                  height:32, padding:'0 10px', whiteSpace:'nowrap',
+                  background:'var(--surface-2)', color: syncingJira ? 'var(--orange)' : 'var(--tx-2)',
+                  border:`1px solid ${syncingJira ? 'rgba(249,115,22,.3)' : 'var(--border)'}`,
+                  borderRadius:'var(--r-md)',
+                  opacity: online === false ? 0.45 : 1,
+                  cursor: online === false || syncingJira ? 'not-allowed' : 'pointer',
+                  transition:'all .15s', fontSize:12, fontWeight:600,
+                }}
+              >
+                <RefreshCw size={12} className={syncingJira ? 'anim-spin' : ''} aria-hidden />
+                Sync Jira
+              </button>
+              </>)}
 
               <button
                 onClick={handleRefresh}
@@ -1109,6 +1156,7 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
               <DeveloperView
                 bugs={parsedBugs}
                 stats={stats}
+                tickets={tickets}
                 onViewBugs={(routing) => navigateToBugs({ platform: [routing] })}
               />
             )}

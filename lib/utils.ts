@@ -112,20 +112,45 @@ export function parseFeatureFlags(record: BugReport): Record<string, unknown> {
 }
 
 export function deriveRoutingToken(record: BugReport): 'BACKEND' | 'MOBILE' | 'WEB' | null {
+  // 1. Rollbar project ID — set at ingest time, most reliable signal for Rollbar bugs.
+  //    782547 = NewYuzeeApp (mobile). 748047 = YuzeeWebRollbar (Java backend).
+  if (record.rollbar_project_id === '782547') return 'MOBILE'
+  if (record.rollbar_project_id === '748047') return 'BACKEND'
+
+  // 2. Platform field — a hardware-level signal that can't be confused by Gemini's
+  //    'frontend_error' category which fires for both mobile and browser errors.
+  const platform = (record.platform || '').toLowerCase()
+  if (platform === 'ios' || platform === 'android') return 'MOBILE'
+  if (platform === 'linux') return 'BACKEND'
+  if (platform === 'browser') return 'WEB'
+
+  // 3. Device OS (populated from user-agent / device metadata)
+  const deviceOs = (record.device_os || '').toLowerCase()
+  if (deviceOs === 'ios' || deviceOs === 'android') return 'MOBILE'
+
+  // 4. Source — 'yuzee_app' is the mobile SDK, 'cloudwatch_poller' is a server job
+  if (record.source === 'yuzee_app')           return 'MOBILE'
+  if (record.source === 'cloudwatch_poller')   return 'BACKEND'
+
+  // 5. Category (AI-derived, comes AFTER hardware signals to prevent
+  //    'frontend_error' on a Flutter/React-Native screen being misrouted to WEB)
+  const cat = record.category || ''
+  if (cat.includes('backend'))  return 'BACKEND'
+  if (cat.includes('mobile'))   return 'MOBILE'
+  if (cat.includes('frontend')) return 'WEB'
+
+  // 6. Backend service name present → server-side error
+  const svc = (record.backend_service || record.backend_service_name || '').trim()
+  if (svc.length > 2) return 'BACKEND'
+
+  // 7. Jira summary keyword — set after ticketing, last resort
   if (record.jira_key) {
     const summary = getField(record, 'jira_summary') as string
     if (summary?.includes('BACKEND')) return 'BACKEND'
     if (summary?.includes('MOBILE'))  return 'MOBILE'
     if (summary?.includes('WEB'))     return 'WEB'
   }
-  const cat = record.category || ''
-  if (cat.includes('backend'))  return 'BACKEND'
-  if (cat.includes('mobile'))   return 'MOBILE'
-  if (cat.includes('frontend')) return 'WEB'
-  const platform = record.platform || ''
-  if (platform === 'Linux') return 'BACKEND'
-  if (['ios', 'android'].includes(platform.toLowerCase())) return 'MOBILE'
-  if (platform === 'browser') return 'WEB'
+
   return null
 }
 
@@ -202,3 +227,71 @@ export const ROUTING_COLORS = {
   MOBILE:  { bg: 'rgba(20,184,166,.12)', color: '#2dd4bf', border: 'rgba(20,184,166,.25)' },
   WEB:     { bg: 'rgba(34,197,94,.12)',  color: '#4ade80', border: 'rgba(34,197,94,.25)'  },
 } as const
+
+/**
+ * Infer which product component a bug belongs to when `component` is null or 'Unknown'.
+ * Returns the existing component unchanged if it is already meaningful.
+ *
+ * Signal priority (highest → lowest):
+ *   component_ucl (set by some ingest paths) → api_endpoint/location path segments →
+ *   backend_service name → description/category keywords
+ */
+export function inferComponent(bug: BugReport): string | null {
+  const comp = bug.component
+  if (comp && comp !== 'Unknown' && comp !== 'unknown') return comp
+
+  // component_ucl is populated by some ingest paths and is more precise than category
+  const ucl = (bug.component_ucl || '').trim()
+  if (ucl && ucl !== 'Unknown' && ucl !== 'unknown') return ucl
+
+  const endpoint   = (bug.api_endpoint || bug.location || bug.frontend_route || '').toLowerCase()
+  const service    = (bug.backend_service || bug.backend_service_name || '').toLowerCase()
+  const desc       = (bug.description || '').toLowerCase()
+  const category   = (bug.category || '').toLowerCase()
+  const page       = (bug.page_url || bug.page_name || '').toLowerCase()
+  const controller = (bug.controller || bug.handler_method || '').toLowerCase()
+  const operation  = (bug.operation || '').toLowerCase()
+  const excClass   = (bug.exception_class || '').toLowerCase()
+  const all = `${endpoint} ${service} ${desc} ${page} ${category} ${controller} ${operation} ${excClass}`
+
+  // ── Auth / Identity ──────────────────────────────────────────────────────
+  // Endpoints: /auth /login /logout /signup /register /onboarding /password /token /oauth /session /verify /credential
+  // Yuzee backend: /users/api/v1/public/users/signup, /users/api/v1/auth/...
+  if (/\/(auth|login|logout|signup|register|onboarding|password|token|oauth|session|verify|credential)/.test(endpoint) ||
+      /\b(useronboarding|onboardingcontroller|onboardingprocessor)\b/.test(controller) ||
+      /\b(authentication|unauthorized|forbidden|token.?expired|invalid.?token|login.?failed)\b/.test(all))
+    return 'Auth'
+
+  // ── Payment / Billing ────────────────────────────────────────────────────
+  if (/\/(payment|order|invoice|billing|checkout|subscription|stripe|refund|wallet|cart|transaction)/.test(endpoint) ||
+      /\b(payment|paymentservice|invoice|billing|checkout|stripe|refund|transaction|wallet)\b/.test(all))
+    return 'Payment'
+
+  // ── Search / Discovery ───────────────────────────────────────────────────
+  if (/\/(search|discovery|explore|filter|recommend)/.test(endpoint) ||
+      service.includes('search') ||
+      /\b(searchcontroller|searchservice|searchresult|full.?text.?search)\b/.test(all))
+    return 'Search'
+
+  // ── Admissions / Courses ─────────────────────────────────────────────────
+  // Yuzee backend: /courses/api /institutes/api → course-service / institute-service
+  if (/\/(admissions?|application|enroll|scholarship|course|university|institute|program|degree|intake)/.test(endpoint) ||
+      service.includes('course') || service.includes('institute') ||
+      /\b(admission|application|enrol|scholarship|courseservice|instituteservice)\b/.test(all))
+    return 'Admissions'
+
+  // ── Profile / Account ────────────────────────────────────────────────────
+  // /users/api/v1/public/users/* → user-service → Profile
+  if (/\/(profile|account|settings|preferences|document|upload|kyc)/.test(endpoint) ||
+      /\/users\/api/.test(endpoint) ||
+      /\b(userprofile|usercontroller|userservice|userprocessor|userdao|userimpl)\b/.test(controller + ' ' + excClass) ||
+      /\b(profile|account.?setting|user.?document)\b/.test(all))
+    return 'Profile'
+
+  // ── Dashboard / Analytics ────────────────────────────────────────────────
+  if (/\/(dashboard|home|overview|analytics|report|stat)/.test(endpoint) ||
+      /\bdashboard\b/.test(page + ' ' + desc))
+    return 'Dashboard'
+
+  return null
+}

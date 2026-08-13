@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import type { ParsedBug } from '@/lib/bugUtils'
 import type { BugReport, SortConfig, Filters } from './DashboardClient'
 import {
@@ -11,10 +11,51 @@ import { useJiraStatuses } from '@/hooks/useJiraStatuses'
 import PageInfo from './ui/PageInfo'
 import {
   ChevronUp, ChevronDown, ChevronsUpDown, ExternalLink, AlertTriangle,
-  Check, Copy, X, Search, ChevronLeft, ChevronRight, History,
+  Check, Copy, X, Search, ChevronLeft, ChevronRight, History, Download,
 } from 'lucide-react'
 
 const PAGE_SIZE = 25
+
+function exportBugsAsJson(bugs: ParsedBug[], total: number) {
+  const payload = {
+    exported_at: new Date().toISOString(),
+    filtered_count: bugs.length,
+    total_count: total,
+    bugs: bugs.map(b => ({
+      report_id:      b.report_id,
+      severity:       b.severity,
+      status:         b.status,
+      component:      b.component,
+      routing_team:   b.routingToken,
+      error_type:     b.errorType,
+      category:       b.category,
+      environment:    b.environment,
+      source:         b.source,
+      platform:       b.platform,
+      description:    b.description,
+      ai_summary:     b.ai_summary,
+      labels:         b.parsedLabels,
+      jira_key:       b.jira_key,
+      jira_pending:   b.jira_pending,
+      is_duplicate:   b.is_duplicate,
+      rollbar_id:     b.rollbar_id,
+      correlation_id: b.correlation_id,
+      exception_class: b.exception_class,
+      api_endpoint:   b.api_endpoint,
+      assigned_owner: b.assigned_owner,
+      ownership_team: b.ownership_team,
+      timestamp:      b.timestamp_utc || b.created_at,
+      reporter:       b.reporter_email,
+    })),
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `yuzee-bugs-${new Date().toISOString().slice(0, 10)}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 interface Props {
   bugs: ParsedBug[]; total: number; selected: Set<string>
@@ -24,7 +65,7 @@ interface Props {
   filters: Filters; setFilters: (f: Filters) => void
 }
 
-const SEV_COL: Record<string, string> = { P1: 'var(--p1)', P2: 'var(--p2)', P3: 'var(--p3)', P4: 'var(--p4)' }
+const SEV_COL: Record<string, string> = { P0: 'var(--p0)', P1: 'var(--p1)', P2: 'var(--p2)', P3: 'var(--p3)', P4: 'var(--p4)' }
 
 /** aria-sort belongs on the <th role="columnheader"> element, not the button inside it. */
 function ariaSortFor(sort: SortConfig, col: keyof BugReport): 'ascending' | 'descending' | 'none' {
@@ -85,6 +126,22 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
+  // Local search input state, debounced 250ms before propagating to parent filters
+  const [localSearch, setLocalSearch] = useState(filters.search)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Sync localSearch when external clear (e.g. clearFilters) resets filters.search
+  useEffect(() => { setLocalSearch(filters.search) }, [filters.search])
+  const handleSearchChange = (val: string) => {
+    setLocalSearch(val)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => setFilters({ ...filters, search: val }), 250)
+  }
+  const handleSearchClear = () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    setLocalSearch('')
+    setFilters({ ...filters, search: '' })
+  }
+
   const { statuses: jiraStatuses } = useJiraStatuses(useMemo(() => bugs.map(b => b.jira_key), [bugs]))
 
   const allChecked = bugs.length > 0 && selected.size === bugs.length
@@ -116,7 +173,7 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
     filters.search,
     ...filters.severity, ...filters.status, ...filters.platform,
     ...filters.component, ...filters.source, ...filters.environment,
-    filters.isDuplicate !== 'all' ? '1' : '',
+    filters.isDuplicate !== 'no' ? '1' : '',   // 'no' is BLANK_FILTERS default
     filters.hasJira !== 'all' ? '1' : '',
     filters.jiraPending !== 'all' ? '1' : '',
     filters.jiraClosed !== 'open_only' ? '1' : '',
@@ -144,15 +201,15 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
             <input
               ref={searchRef}
               type="text"
-              value={filters.search}
-              onChange={e => set('search', e.target.value)}
+              value={localSearch}
+              onChange={e => handleSearchChange(e.target.value)}
               placeholder="Search description, report ID, Jira key, AI summary…"
-              style={{ width: '100%', background: 'var(--surface-2)', border: `1px solid ${filters.search ? 'rgba(249,115,22,.35)' : 'var(--border)'}`, borderRadius: 'var(--r-md)', padding: '5px 28px 5px 26px', fontSize: 12, color: 'var(--tx-1)', outline: 'none', boxSizing: 'border-box' }}
+              style={{ width: '100%', background: 'var(--surface-2)', border: `1px solid ${localSearch ? 'rgba(249,115,22,.35)' : 'var(--border)'}`, borderRadius: 'var(--r-md)', padding: '5px 28px 5px 26px', fontSize: 12, color: 'var(--tx-1)', outline: 'none', boxSizing: 'border-box' }}
               onFocus={e => (e.target as HTMLElement).style.borderColor = 'var(--orange)'}
-              onBlur={e => (e.target as HTMLElement).style.borderColor = filters.search ? 'rgba(249,115,22,.35)' : 'var(--border)'}
+              onBlur={e => (e.target as HTMLElement).style.borderColor = localSearch ? 'rgba(249,115,22,.35)' : 'var(--border)'}
             />
-            {filters.search && (
-              <button onClick={() => set('search', '')} aria-label="Clear search" style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)', background: 'none', color: 'var(--tx-3)', display: 'flex', cursor: 'pointer' }}>
+            {localSearch && (
+              <button onClick={handleSearchClear} aria-label="Clear search" style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--tx-3)', display: 'flex', cursor: 'pointer' }}>
                 <X size={11} />
               </button>
             )}
@@ -166,12 +223,21 @@ export default function BugTable({ bugs, total, selected, onToggle, onSelectAll,
               <X size={10} /> {activeCount} filter{activeCount > 1 ? 's' : ''} active
             </button>
           )}
+          <button
+            onClick={() => exportBugsAsJson(bugs, total)}
+            disabled={bugs.length === 0}
+            title="Export visible bugs as JSON (AI-readable)"
+            aria-label={`Export ${bugs.length} bugs as JSON`}
+            style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, padding: '3px 9px', borderRadius: 'var(--r-sm)', background: 'var(--surface-2)', color: 'var(--tx-2)', border: '1px solid var(--border)', cursor: bugs.length === 0 ? 'not-allowed' : 'pointer', opacity: bugs.length === 0 ? 0.4 : 1, marginLeft: 'auto', flexShrink: 0 }}
+          >
+            <Download size={10} aria-hidden /> Export JSON
+          </button>
         </div>
 
         {/* Row 2: dropdown filters */}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <DropFilter label="Severity" value={filters.severity[0] || 'all'} active={filters.severity.length > 0}
-            options={[{ value: 'all', label: 'All severities' }, ...['P1', 'P2', 'P3', 'P4'].map(s => ({ value: s, label: s }))]}
+            options={[{ value: 'all', label: 'All severities' }, ...['P0', 'P1', 'P2', 'P3', 'P4'].map(s => ({ value: s, label: s }))]}
             onChange={v => set('severity', v === 'all' ? [] : [v])}
           />
           <DropFilter label="Platform" value={filters.platform[0] || 'all'} active={filters.platform.length > 0}

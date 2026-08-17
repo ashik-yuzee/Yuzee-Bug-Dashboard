@@ -147,15 +147,22 @@ function relativeTime(iso: string | null): string {
 }
 
 // ─── MYT / Maintenance helpers ────────────────────────────────
-// MYT = Asia/Kuala_Lumpur = UTC+8. Maintenance window: 00:00–09:00 MYT daily.
+// MYT = Asia/Kuala_Lumpur = UTC+8.
+// Maintenance window: 00:00–10:15 MYT Mon–Sat, 00:00–11:00 MYT Sunday.
+// Servers are up at 10:00 MYT but take 15 min to boot (weekdays).
+// On Sundays servers run from 11:00 MYT.
 
 function getMYTHour(iso: string): number {
   return new Date(new Date(iso).getTime() + 8 * 3_600_000).getUTCHours()
 }
 
 function isMaintenancePeriod(iso: string): boolean {
-  const h = getMYTHour(iso)
-  return h >= 0 && h < 9
+  const myt = new Date(new Date(iso).getTime() + 8 * 3_600_000)
+  const h   = myt.getUTCHours()
+  const m   = myt.getUTCMinutes()
+  const day = myt.getUTCDay() // 0 = Sunday
+  if (day === 0) return h < 11                  // Sunday: until 11:00 MYT
+  return h < 10 || (h === 10 && m < 15)         // Mon–Sat: until 10:15 MYT
 }
 
 function isMYTMaintenanceNow(): boolean {
@@ -2618,7 +2625,7 @@ function OverviewTab({ monitors, incidents, failedChecks, loading, timeRange, on
         {/* Response time bars */}
         <div style={{ flex: '2 1 300px', background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', padding: '14px 18px' }}>
           <p style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx-1)', margin: '0 0 2px' }}>Response Times</p>
-          <p style={{ fontSize: 10, color: 'var(--tx-3)', margin: '0 0 12px' }}>Service-hours avg · 00:00–09:00 MYT excluded · threshold markers shown</p>
+          <p style={{ fontSize: 10, color: 'var(--tx-3)', margin: '0 0 12px' }}>Service-hours avg · 00:00–10:15 MYT (Sun: 11:00) excluded · threshold markers shown</p>
           {loading
             ? <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{Array.from({ length: 5 }, (_, i) => <div key={i} className="skeleton" style={{ height: 8 }} />)}</div>
             : hasResponseData
@@ -2848,7 +2855,7 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
         .order('checked_at', { ascending: false })
         .limit(40000)
 
-      // Group uptime checks per monitor, excluding the 12am-9am MYT maintenance window
+      // Group uptime checks per monitor, excluding the MYT maintenance window (10:15 Mon–Sat, 11:00 Sun)
       const uptimeMap: Record<string, { up: number; total: number }> = {}
       for (const c of (uptimeChecks ?? []) as { monitor_id: string; status: string; checked_at: string }[]) {
         if (isMaintenancePeriod(c.checked_at)) continue
@@ -2956,7 +2963,7 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
         const { data: fcData, error: fcErr } = await fcQ
         if (!fcErr) {
           const all = (fcData ?? []) as FailedCheckRow[]
-          // Exclude checks that occurred during maintenance window (00:00–09:00 MYT)
+          // Exclude checks that occurred during maintenance window (until 10:15 MYT Mon–Sat, 11:00 MYT Sun)
           setFailedChecks(all.filter(c => !isMaintenancePeriod(c.checked_at)))
         }
       }
@@ -3099,7 +3106,7 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
         {isMaintenance && (
           <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', marginBottom: 12, background: 'rgba(227,179,65,.10)', borderWidth: 1, borderStyle: 'solid', borderColor: 'rgba(227,179,65,.30)', borderRadius: 'var(--r-md)', fontSize: 12, color: C.warning }}>
             <span style={{ fontSize: 14 }}>🔧</span>
-            <span><strong>Maintenance window active</strong> — 12:00 AM – 9:00 AM MYT. Failures during this period are excluded from all data.</span>
+            <span><strong>Maintenance window active</strong> — 12:00 AM – {new Date(Date.now() + 8 * 3_600_000).getUTCDay() === 0 ? '11:00 AM' : '10:15 AM'} MYT. Failures during this period are excluded from all data.</span>
           </div>
         )}
 
@@ -3117,7 +3124,7 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
             />
           </div>
           <span style={{ fontSize: 11, color: 'var(--tx-3)' }}>
-            Maintenance hours (00:00–09:00 MYT) excluded from all data
+            Maintenance hours (00:00–10:15 MYT Mon–Sat, 00:00–11:00 MYT Sun) excluded from all data
           </span>
         </div>
         {/* Tab bar */}

@@ -295,3 +295,47 @@ export function inferComponent(bug: BugReport): string | null {
 
   return null
 }
+
+/**
+ * Columns to select for the bug list view — excludes large JSONB and payload
+ * columns that are only needed in the detail panel. Saves ~40-75 MB per page
+ * load on the Supabase free tier. Lazy-load the excluded columns individually
+ * when a specific bug's detail panel is opened.
+ *
+ * Excluded: full_data, rollbar_enrichment, posthog_enrichment,
+ *           api_request_payload, api_response_payload
+ */
+export const BUG_LIST_COLS = [
+  'report_id','source','reporter_email','description','platform','app_version',
+  'severity','ai_summary','jira_key','jira_url','status','created_at',
+  'category','location','when','frequency','anything_else',
+  'labels','component','confidence','is_duplicate','triaged_at',
+  'screenshot_url','jira_pending','retry_count',
+  'correlation_id','rollbar_id','rollbar_project_id','timestamp_utc','environment',
+  'ignore_auto_ticket','triage_reasoning','n8n_execution_id',
+  'rollbar_hash','error_fingerprint','fingerprint',
+  'cw_source_group','cw_log_stream',
+  'api_endpoint','http_method','request_body_shape','request_headers_shape',
+  'query_params_shape','frontend_route','previous_route','user_action',
+  'page_name','header_title','active_footer_tab','active_component','request_id',
+  'backend_service','downstream_service','downstream_endpoint','downstream_status',
+  'error_source','ownership','suppression_reason','rollbar_project_type',
+  'rollbar_session_id','failed_network_url','status_code','page_url',
+  'telemetry_summary','rollbar_replay_enabled','rollbar_replay_search_hint',
+  'assigned_owner','ownership_team','ownership_reason','ticket_action',
+  'ticketability_score','evidence_score','impact_score',
+  'ticketability_confidence_score','ticketability_reason','is_critical_path',
+  'low_evidence','occurrence_count','review_reason','trace_id',
+  'exception_class','operation','handler_method','controller',
+  'duration_ms','server_name','cloudwatch_event_type',
+  'rollbar_replay_id','rollbar_replay_api_path',
+  'rollbar_replay_s3_url','rollbar_replay_archive_status',
+  'filtered_reason','component_ucl','module',
+  'battery_level','battery_saving','device_model','device_os','device_os_ver',
+  'network_effective','browser','screen_res',
+  'cloudwatch_log_group','user_id',
+  'rollbar_language','rollbar_framework','feature_flags','context_complete',
+  'rollbar_notifier','posthog_session_id','posthog_session_url',
+  'is_java_backend','http_status_code','backend_service_name',
+  'rollbar_component','rollbar_auth_state','rollbar_network_type',
+].join(',')

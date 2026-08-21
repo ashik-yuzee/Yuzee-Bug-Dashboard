@@ -121,6 +121,38 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated, onOpenTicke
   const [linkedTicket, setLinkedTicket] = useState<InternalTicket | null | undefined>(undefined)
   const [showTicketModal, setShowTicketModal] = useState(false)
 
+  // Lazy-load large columns excluded from the main list query (full_data, rollbar_enrichment,
+  // posthog_enrichment, api_request_payload, api_response_payload). These are only fetched
+  // when the user actually opens a bug's detail panel.
+  const [heavyData, setHeavyData] = useState<{
+    full_data: unknown
+    rollbar_enrichment: unknown
+    posthog_enrichment: unknown
+    api_request_payload: string | null
+    api_response_payload: string | null
+  } | null>(null)
+  const [heavyLoading, setHeavyLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setHeavyData(null)
+    setHeavyLoading(true)
+    const supabaseInner = createClient()
+    ;(async () => {
+      try {
+        const { data } = await supabaseInner
+          .from('bug_reports')
+          .select('full_data,rollbar_enrichment,posthog_enrichment,api_request_payload,api_response_payload')
+          .eq('report_id', bug.report_id)
+          .maybeSingle()
+        if (!cancelled) setHeavyData(data as typeof heavyData)
+      } catch { /* ignore */ }
+      finally { if (!cancelled) setHeavyLoading(false) }
+    })()
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bug.report_id])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', handler)
@@ -157,8 +189,11 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated, onOpenTicke
   const replayUrl = rollbarReplayUrl(bug)
   const posthogSessionUrl = getField(bug, 'posthog_session_url') as string | null
 
+  // Parse full_data from the lazily-loaded heavyData (not the list-query bug object,
+  // which no longer includes this column to reduce Supabase I/O).
   const fullParsed = (() => {
-    try { return typeof bug.full_data === 'string' ? JSON.parse(bug.full_data) : bug.full_data }
+    const fd = heavyData?.full_data ?? bug.full_data
+    try { return typeof fd === 'string' ? JSON.parse(fd) : fd }
     catch { return null }
   })()
   const rollbarPreload = fullParsed?.body?.rollbar_preload ?? null
@@ -203,7 +238,7 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated, onOpenTicke
       setPipelineLoading(true)
       try {
         const [queueRes, feedbackRes] = await Promise.all([
-          supabase.from('gemini_queue').select('*').eq('report_id', bug.report_id).order('created_at', { ascending: false }),
+          supabase.from('gemini_queue').select('id,report_id,status,queued_at,started_at,finished_at,processed_at,retry_count,error_message,n8n_execution_id,created_at').eq('report_id', bug.report_id).order('created_at', { ascending: false }),
           supabase.from('triage_feedback').select('*').or(`report_id.eq.${bug.report_id}${bug.jira_key ? `,jira_key.eq.${bug.jira_key}` : ''}`),
         ])
         if (cancelled) return
@@ -474,10 +509,12 @@ export default function BugDetailPanel({ bug, onClose, onBugUpdated, onOpenTicke
             </p>
           </Section>
 
-          {/* Rollbar exception */}
+          {/* Rollbar exception — only shown when full_data has been lazy-loaded */}
           {(bug.rollbar_id || rollbarPreload) && (
             <Section title={`Exception${bug.rollbar_id ? ` — Rollbar #${bug.rollbar_id}` : ''}`}>
-              {rollbarPreload ? (
+              {heavyLoading ? (
+                <div className="skeleton" style={{ height: 60, borderRadius: 'var(--r-md)' }} />
+              ) : rollbarPreload ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {rollbarPreload.title && (
                     <div>

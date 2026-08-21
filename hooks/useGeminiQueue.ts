@@ -54,10 +54,18 @@ async function fetchQueueStats(): Promise<{ stats: GeminiQueueStats; error: stri
     let totalMs = 0, processedCount = 0
 
     for (const item of items) {
-      const s = item.status as keyof typeof counts
-      if (s in counts) counts[s]++
-      if (item.status === 'processed' && item.processed_at && item.queued_at) {
-        const ms = new Date(item.processed_at).getTime() - new Date(item.queued_at).getTime()
+      // Normalize new n8n status values (post-Aug 2026) to legacy display buckets:
+      //   complete → processed, error → failed, skipped → stale
+      const s = item.status
+      if (s === 'queued')                       counts.queued++
+      else if (s === 'processed' || s === 'complete') counts.processed++
+      else if (s === 'failed'    || s === 'error')    counts.failed++
+      else if (s === 'stale'     || s === 'skipped')  counts.stale++
+
+      // Use finished_at (new) or processed_at (legacy) for avg triage time
+      const endTs = item.finished_at || item.processed_at
+      if ((s === 'processed' || s === 'complete') && endTs && item.queued_at) {
+        const ms = new Date(endTs).getTime() - new Date(item.queued_at).getTime()
         if (ms > 0) { totalMs += ms; processedCount++ }
       }
     }

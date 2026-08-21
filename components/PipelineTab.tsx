@@ -10,11 +10,16 @@ import toast from '@/lib/toast'
 import { AlertTriangle, RefreshCw, CheckCircle2, Clock, XCircle, Loader2 } from 'lucide-react'
 
 /* ─── Status badge ─────────────────────────────────────────── */
+// Includes both legacy statuses (processed/stale/failed) and new n8n statuses
+// (complete/skipped/error — introduced Aug 2026 with the retention overhaul).
 const STATUS_STYLE: Record<string, { bg: string; color: string; border: string }> = {
   queued:    { bg: 'rgba(88,166,255,.10)',  color: 'var(--info)',    border: 'rgba(88,166,255,.22)'  },
   processed: { bg: 'rgba(63,185,80,.10)',   color: 'var(--success)', border: 'rgba(63,185,80,.22)'  },
+  complete:  { bg: 'rgba(63,185,80,.10)',   color: 'var(--success)', border: 'rgba(63,185,80,.22)'  },
   stale:     { bg: 'rgba(125,133,144,.10)', color: 'var(--tx-3)',    border: 'rgba(125,133,144,.22)' },
+  skipped:   { bg: 'rgba(125,133,144,.10)', color: 'var(--tx-3)',    border: 'rgba(125,133,144,.22)' },
   failed:    { bg: 'rgba(248,81,73,.10)',   color: 'var(--danger)',  border: 'rgba(248,81,73,.22)'   },
+  error:     { bg: 'rgba(248,81,73,.10)',   color: 'var(--danger)',  border: 'rgba(248,81,73,.22)'   },
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -49,6 +54,8 @@ async function fetchDataQualityCounts(): Promise<Record<string, number>> {
     unknownComp,
     missingSev,
     missingJiraNotPending,
+    suppressionRules,
+    suppressedEvents,
   ] = await Promise.all([
     supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('correlation_id', null).eq('source', 'rollbar_auto'),
     supabase.from('bug_reports').select('*', { count: 'exact', head: true }).eq('jira_pending', true),
@@ -56,6 +63,8 @@ async function fetchDataQualityCounts(): Promise<Record<string, number>> {
     supabase.from('bug_reports').select('*', { count: 'exact', head: true }).eq('component', 'Unknown'),
     supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('severity', null),
     supabase.from('bug_reports').select('*', { count: 'exact', head: true }).is('jira_key', null).not('status', 'eq', 'pending').not('is_duplicate', 'eq', true).is('jira_pending', null),
+    supabase.from('bug_suppression_rules').select('*', { count: 'exact', head: true }).eq('is_active', true),
+    supabase.from('suppressed_events').select('*', { count: 'exact', head: true }),
   ])
   return {
     missingCorrel: missingCorrel.count ?? 0,
@@ -64,6 +73,8 @@ async function fetchDataQualityCounts(): Promise<Record<string, number>> {
     unknownComp: unknownComp.count ?? 0,
     missingSev: missingSev.count ?? 0,
     missingJiraNotPending: missingJiraNotPending.count ?? 0,
+    suppressionRules: suppressionRules.count ?? 0,
+    suppressedEvents: suppressedEvents.count ?? 0,
   }
 }
 
@@ -252,6 +263,8 @@ export default function PipelineTab() {
     },
     { issue: 'component = Unknown (Gemini couldn\'t classify)', count: dq.unknownComp ?? null, loading: dqLoading, action: inferComponents, actionLabel: 'Infer from endpoint →', actionLoading: inferringComponents },
     { issue: 'Missing severity (triage not run)', count: dq.missingSev ?? null, loading: dqLoading },
+    { issue: 'Active suppression rules (bug_suppression_rules)', count: dq.suppressionRules ?? null, loading: dqLoading },
+    { issue: 'Total suppressed events (suppressed_events)', count: dq.suppressedEvents ?? null, loading: dqLoading },
   ]
 
   return (

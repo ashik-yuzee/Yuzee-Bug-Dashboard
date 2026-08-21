@@ -36,7 +36,7 @@ import Reports from './Reports'
 import PostHogTab from './PostHogTab'
 import ServerHealthPage from './ServerHealthPage'
 import LogExportTab from './LogExportTab'
-import { isLegacy, LEGACY_CUTOFF_ISO } from '@/lib/utils'
+import { isLegacy, LEGACY_CUTOFF_ISO, BUG_LIST_COLS } from '@/lib/utils'
 
 export type BugReport = {
   report_id: string; source: string | null; reporter_email: string | null
@@ -154,10 +154,12 @@ export type BugReport = {
 export type GeminiQueueItem = {
   id: string
   report_id: string
-  status: 'queued' | 'processed' | 'stale' | 'failed'
+  // Legacy statuses: queued | processed | stale | failed
+  // New n8n statuses (post-Aug 2026): queued | complete | error | skipped
+  status: 'queued' | 'processed' | 'complete' | 'stale' | 'skipped' | 'failed' | 'error'
   queued_at: string
   started_at: string | null
-  finished_at: string | null
+  finished_at: string | null  // auto-stamped on status → 'processed' or 'complete'
   processed_at: string | null
   retry_count: number
   error_message: string | null
@@ -484,10 +486,11 @@ export default function DashboardClient({ user, initialBugs, initialTab }: Props
     try {
       const { data, error } = await supabase
         .from('bug_reports')
-        .select('*')
+        .select(BUG_LIST_COLS)
         .order('created_at', { ascending: false })
+        .limit(1500)
       if (error) throw error
-      setBugs(data || [])
+      setBugs((data || []) as unknown as BugReport[])
       clearNewBugs()
       toast.dismiss(tid)
       toast.success('Data refreshed', `${data?.length ?? 0} reports loaded`)

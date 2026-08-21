@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation'
 import { cookies } from 'next/headers'
 import { createClient } from '@/lib/supabase/server'
 import DashboardClient from '@/components/DashboardClient'
+import { BUG_LIST_COLS } from '@/lib/utils'
 
 export const dynamic = 'force-dynamic'
 
@@ -19,11 +20,11 @@ export default async function DashboardPage() {
   const supabase = await createClient()
   const { data: bugs, error } = await supabase
     .from('bug_reports')
-    .select('*')
+    .select(BUG_LIST_COLS)
     .order('created_at', { ascending: false })
     .limit(1500)
 
   if (error) console.error('[dashboard] initial fetch failed:', error.message)
 
-  return <DashboardClient user={{ email: 'admin' }} initialBugs={bugs || []} initialTab={initialTab} />
+  return <DashboardClient user={{ email: 'admin' }} initialBugs={(bugs || []) as unknown as import('@/components/DashboardClient').BugReport[]} initialTab={initialTab} />
 }

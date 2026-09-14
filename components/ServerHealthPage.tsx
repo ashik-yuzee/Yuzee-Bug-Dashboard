@@ -3204,16 +3204,16 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {sortedEnvs.map(env => {
                       const envMonitors = grouped.get(env)!
-                      const downCount     = envMonitors.filter(m => m.status === 'down').length
-                      const degradedCount = envMonitors.filter(m => m.status === 'degraded').length
+                      const downCount     = envMonitors.filter(m => m.status === 'down' && m.last_error_class !== 'timeout').length
+                      const slowCount     = envMonitors.filter(m => m.status === 'degraded' || (m.status === 'down' && m.last_error_class === 'timeout')).length
                       const isCollapsed   = collapsedEnvs.has(env)
                       const toggle = () => setCollapsedEnvs(prev => {
                         const next = new Set(prev)
                         next.has(env) ? next.delete(env) : next.add(env)
                         return next
                       })
-                      const headerBg = downCount > 0 ? 'rgba(239,68,68,0.06)' : degradedCount > 0 ? 'rgba(245,158,11,0.06)' : 'var(--surface-2)'
-                      const headerBorder = downCount > 0 ? 'rgba(239,68,68,0.25)' : degradedCount > 0 ? 'rgba(245,158,11,0.25)' : 'var(--border)'
+                      const headerBg = downCount > 0 ? 'rgba(239,68,68,0.06)' : slowCount > 0 ? 'rgba(245,158,11,0.06)' : 'var(--surface-2)'
+                      const headerBorder = downCount > 0 ? 'rgba(239,68,68,0.25)' : slowCount > 0 ? 'rgba(245,158,11,0.25)' : 'var(--border)'
                       return (
                         <div key={env} style={{ borderWidth: 1, borderStyle: 'solid', borderColor: headerBorder, borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
                           <button
@@ -3226,10 +3226,10 @@ export default function ServerHealthPage({ onRateLimitUpdate }: { onRateLimitUpd
                             {downCount > 0 && (
                               <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}>{downCount} down</span>
                             )}
-                            {degradedCount > 0 && (
-                              <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: 'rgba(245,158,11,0.15)', color: '#f59e0b' }}>{degradedCount} degraded</span>
+                            {slowCount > 0 && (
+                              <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: 'rgba(245,158,11,0.15)', color: '#f59e0b' }}>{slowCount} slow</span>
                             )}
-                            {downCount === 0 && degradedCount === 0 && (
+                            {downCount === 0 && slowCount === 0 && (
                               <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: 'rgba(34,197,94,0.12)', color: '#22c55e' }}>all up</span>
                             )}
                             <span style={{ fontSize: 11, color: 'var(--tx-3)', marginLeft: 4 }}>{envMonitors.length} monitors</span>
